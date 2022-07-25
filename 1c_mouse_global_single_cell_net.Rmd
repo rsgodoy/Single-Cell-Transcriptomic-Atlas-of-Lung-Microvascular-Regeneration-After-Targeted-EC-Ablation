@@ -1,0 +1,598 @@
+---
+title: "1c_mouse_global_single_cell_net"
+output: html_notebook
+---
+Run this from desktop R v 3.6
+**Start this file on approach 3 as the first 2 are not optimal **
+
+```{r}
+getRversion()
+```
+```{r}
+getwd()
+```
+
+#Install packages
+
+```{r}
+#single cell net
+#devtools::install_github("pcahan1/singleCellNet")
+```
+
+#Libraries
+
+```{r}
+library(Seurat)
+library(devtools)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(Rtsne)
+library(cowplot)
+library(cowplot)
+library(knitr)
+library(tidyverse)
+library(singleCellNet)
+```
+
+#1_Seurat object
+
+```{r}
+seurat <- readRDS("/Users/rafaelgodoy/Documents/CODE/6d_mouse_nov2020_final/0_raw_data_David_new_data_Nov_2020/seurat_filtered_processed.rds")
+```
+
+##Add Totalcells column
+
+```{r}
+seurat$Totalcells <- seurat$orig.ident
+seurat$Totalcells[seurat$orig.ident %in% c("PoolA", "PoolB", "PoolC")] <- "Cells"
+```
+
+#2_SingleCellNET
+
+Find the Vignette : https://pcahan1.github.io/singleCellNet/
+
+sampTab --  sample table, this should be your metadata
+expDat --  expression data, this should be your matrix
+
+##2.1_Load data 
+
+**This is my data** **jump to next step as we are starting with seurat object**
+
+SCN provides utility functions to load in rda and loom file. To load rda file, users only need to provide the filenames that lead to sample table and expression matrix. To load loom file, users need to provide the path of the loom file, and specifies the annotation column needed as sample annotation.
+$$
+```{r}
+#load rda file
+sampTab <- utils_loadObject(fname)
+expDat <- utils_loadObject(fname)
+  
+```
+OR
+```{r}
+# load loom file
+lfile <- loadLoomExpCluster(path , cellNameCol = "obs_names", xname = "cluster")
+sampTab = lfile$sampTab
+expDat = lfile$expDat
+```
+$$
+
+
+##2.2_Object conversion
+
+Though the direct input for SCN is basic S3 class object, SCN incorporates utility functions to ease the transition SingleCellExperiment object and Seurat object to SCN analysis.
+$$
+```{r}
+#exp_type options can be: counts, data, and scale.data if they are available in your sce object
+scefile <- extractSCE(sce_object, exp_slot_name = "counts") 
+sampTab = scefile$sampTab
+expDat = scefile$expDat
+```
+$$
+
+
+```{r}
+#exp_type options can be: counts, normcounts, and logcounts, if they are available in your sce object
+seurat <- extractSeurat(seurat, exp_slot_name = "counts")
+sampTab = seurat$sampTab
+expDat = seurat$expDat
+```
+
+##3.1_Loading example data into R
+
+Here we will download the full tabula muris data sent from 10X genomics
+
+```{r}
+#loading training data
+tm_10x <- utils_loadObject("/Users/rafaelgodoy/Documents/CODE/6b_mouse_DTR_opt/4b_6b_single_cell/stList_tm10x_full.rda")
+expTMraw <- tm_10x$expDat
+stTM <- tm_10x$sampTab
+```
+
+```{r}
+#loading query data
+stQuery <- sampTab #metadata
+expQuery <- expDat #expression matrix
+```
+
+##3.2_Orthologs
+
+However, if your training data and query data are of the same specie, you can skip this ortholog conversion step and just subset the datasets based on common genes before proceeding to training.
+
+```{r}
+expTrain <- expTMraw #expression matrix
+```
+
+```{r}
+expQuery <- expQuery
+```
+
+
+```{r}
+#loading common genes
+commonGenes<-intersect(rownames(expTrain), rownames(expQuery))
+expTrain <- expTrain[commonGenes, ]
+expQuery <- expQuery[commonGenes, ]
+```
+
+##3.3_Training the data
+
+We use the same number of cells per cell type, i.e. balanced data, to train Top-Pair Random Forest classifier. The remaining of the data or the held-out data will be used as validation data to evaluate the performance of the TP-RF classifier. Empirically we have found 50 cells to be a minimal cell number to create a classifier with good performance, however it may vary depend on the quality of your reference data, so it is really important to assess the performance of your classifier before proceeding to query your sample of interest.
+
+```{r}
+stList<-splitCommon(sampTab = stTM, ncells = 50, dLevel = "cell_ontology_class")
+```
+
+```{r}
+stTrain<-stList[[1]]   #or can do as: stTrain = stList$train
+
+#do not need to do next line, already established before 
+
+#expTrain <- as.matrix(expTMraw[ ,as.vector(stTrain$cell)]) or can write 
+#expTrain <- expTrain[,stTrain$cell]
+```
+
+```{r}
+stTest <- stList[[2]]
+expTest <- expTrain[,stTest$cell]
+```
+
+```{r}
+dim(stTest)
+dim(stTrain)
+```
+
+We need to remove all NA values from our data set because otherwise there will be non-unique rows and function will not work. 
+
+```{r}
+stTest <- stTest[-which(is.na(stTest$cell_ontology_class)),] #remove NAs
+dim(stTest)
+```
+
+```{r}
+stTrain <- stTrain[-which(is.na(stTrain$cell_ontology_class)),] #remove NAs
+dim(stTrain)
+```
+
+```{r}
+#expTrain <- expTrain[-which(is.na(expTrain$cell_ontology_class)),] #remove NAs
+dim(expTrain)
+```
+
+
+```{r}
+#our computer is not strong enought to run full tabula muris, lets select only lung cells in our samples
+stTest <- stTest[which(stTest$tissue == "Lung"),] #Keep only lung cells
+dim(stTest)
+```
+
+```{r}
+stTrain <- stTrain[which(stTrain$tissue == "Lung"),] #Keep only lung cells
+dim(stTrain)
+```
+
+```{r}
+#expTrain <- expTrain[which(expTrain$tissue == "Lung"),] #Keep only lung cells
+dim(expTrain)
+```
+
+```{r}
+options(future.globals.maxSize = 12000 * 1024^2)       #use this function if memory becomes an issue
+#or can set to infinit
+options(future.globals.maxSize = Inf) 
+```
+
+```{r}
+Sys.setenv(R_MAX_VSIZE = 32000000000)
+Sys.getenv('R_MAX_VSIZE')
+
+```
+
+
+```{r}
+#there will be a memory exhausted limit reached issue, for this lets try to remove unwanted variables
+rm(tm_10x, expDat, expTMraw)
+```
+
+```{r}
+system.time(class_info<-scn_train(stTrain = stTrain, expTrain = expTrain, 
+                                  nTopGenes = 10, nRand = 100, nTrees = 1000, nTopGenePairs = 25, 
+                                  dLevel = "cell_ontology_class", colName_samp = "cell"))
+```
+
+```{r}
+which(duplicated(stTrain$cell_ontology_class))
+```
+
+
+
+#_________________
+#New approach to try to solve lack of memory issue
+#_________________
+__________________________________________________________________________________
+
+#1_lib
+
+```{r}
+library(singleCellNet)
+library(Seurat)
+```
+
+#2_Train classifier
+
+```{r}
+#loading training data
+tm_10x <- utils_loadObject("/Users/rafaelgodoy/Documents/CODE/6b_mouse_DTR_opt/4b_6b_single_cell/stList_tm10x_full.rda")
+tm.droplet.matrix = tm_10x$expDat
+tm.droplet.metadata = tm_10x$sampTab
+```
+
+```{r}
+table(tm.droplet.metadata[which(tm.droplet.metadata$tissue == "Lung"), "cell_ontology_class"])
+```
+
+```{r}
+st_lung_tm_10x = tm.droplet.metadata[which(tm.droplet.metadata$tissue == "Lung"), ]
+dim(st_lung_tm_10x)
+```
+
+```{r}
+st_lung_tm_10x = st_lung_tm_10x[-which(is.na(st_lung_tm_10x$cell_ontology_class)),] #remove NAs
+dim(st_lung_tm_10x)
+```
+
+```{r}
+stList = splitCommon(st_lung_tm_10x, ncells = 20, dLevel = "cell_ontology_class") #get training data
+stTrain = stList$train
+expTrain = as.matrix(tm.droplet.matrix[,as.vector(stTrain$cell)])
+```
+
+```{r}
+system.time(class_info_lung<-scn_train(stTrain = stTrain, expTrain = expTrain, 
+                                       nTopGenes = 10, nRand = 100, nTrees = 1000, nTopGenePairs = 25, 
+                                       dLevel = "cell_ontology_class", colName_samp = "cell"))
+```
+
+```{r}
+stTest = stList$val
+expTest = as.matrix(tm.droplet.matrix[,as.vector(stTest$cell)])
+classRes_val_all = scn_predict(cnProc=class_info_lung[['cnProc']], expDat=expTest, nrand = 50)
+```
+
+```{r}
+tm_heldoutassessment = assess_comm(ct_scores = classRes_val_all, stTrain = stTrain, 
+                                   stQuery = stTest, dLevelSID = "cell", 
+                                   classTrain = "cell_ontology_class", classQuery = "cell_ontology_class", nRand = 50)
+```
+
+```{r}
+plot_PRs(tm_heldoutassessment)
+```
+
+```{r}
+plot_metrics(tm_heldoutassessment)
+```
+
+```{r}
+nrand = 50
+sla = stTest$cell_ontology_class
+names(sla) = stTest$cell
+slaRand = rep("rand", nrand) 
+names(slaRand) = paste("rand_", 1:nrand, sep='')
+sla = append(sla, slaRand) #include in the random cells profile created
+sc_hmClass(classMat = classRes_val_all,grps = sla, max=5000, isBig=TRUE)
+```
+
+```{r}
+save(class_info_lung, file = "/Users/rafaelgodoy/Documents/CODE/6b_mouse_DTR_opt/4b_6b_single_cell/class_info_lung.rda")
+```
+
+____________________
+____________________
+
+#_______
+#Approach 3
+#_______
+
+#1_lib
+
+```{r}
+library(singleCellNet)
+library(Seurat)
+```
+
+#2_Load Query data 
+
+This is my set of data, we are going to extract from the seurat object
+
+```{r}
+seurat <- readRDS("/Users/rafaelgodoy/Documents/CODE/6d_mouse_nov2020_final/0_raw_data_David_new_data_Nov_2020/seurat_filtered_processed.rds")
+```
+
+```{r}
+#exp_type options can be: counts, normcounts, and logcounts, if they are available in your sce object
+#here we will use the example name Park, to keep nomenclature consistent with vignette
+seurat <- extractSeurat(seurat, exp_slot_name = "counts")
+stPark = seurat$sampTab      #this is our metadata
+expPark = seurat$expDat      #this is our matrix
+
+genesPark =  rownames(expPark)
+
+rm(expPark)
+
+gc()         #this is a garbage colection function. 
+
+```
+
+#3_Load the training data 
+
+This is the tabula muris complete data set 
+
+```{r}
+#loading training data
+tm_10x <- utils_loadObject("/Users/rafaelgodoy/Documents/CODE/6b_mouse_DTR_opt/4b_6b_single_cell/stList_tm10x_full.rda")
+
+expTMraw= tm_10x$expDat
+dim(expTMraw)
+
+stTM = tm_10x$sampTab
+dim(stTM)
+
+stTM <- droplevels(stTM)
+```
+
+```{r}
+table(stTM[which(stTM$tissue == "Lung"), "cell_ontology_class"])
+```
+
+```{r}
+#Keep only lung cells
+stTM = stTM[which(stTM$tissue == "Lung"), ]
+dim(stTM)
+```
+
+```{r}
+#eliminate NAs
+stTM = stTM[-which(is.na(stTM$cell_ontology_class)),] #remove NAs
+dim(stTM)
+```
+
+#4_Find genes in common to the data set and limit analysisto these 
+
+```{r}
+commonGenes = intersect(rownames(expTMraw), genesPark)
+length(commonGenes)
+```
+
+```{r}
+expTMraw = expTMraw[commonGenes,]
+```
+
+#5_Split for training and assessment, and transform training data
+
+```{r}
+set.seed(100) #can be any random seed number
+stList = splitCommon(sampTab=stTM, ncells=24, dLevel="cell_ontology_class")
+stTrain = stList[[1]]
+expTrain = expTMraw[,stTrain$cell] #suggested was expTrain = expTMraw[,rownames(stTrain)] but this did not work
+```
+
+#6_Train the classifier
+
+```{r}
+system.time(class_info<-scn_train(stTrain = stTrain, expTrain = expTrain, nTopGenes = 10, nRand = 100, nTrees = 1000, nTopGenePairs = 25, dLevel = "cell_ontology_class", colName_samp = "cell"))
+```
+
+#7_Apply to held out data
+
+```{r}
+#validate data
+stTestList = splitCommon(sampTab=stList[[2]], ncells=100, dLevel="cell_ontology_class") #normalize validation data so that the assessment is as fair as possible
+stTest = stTestList[[1]]
+expTest = as.matrix(expTMraw[,as.vector(stTest$cell)])
+#expTest = expTMraw[commonGenes,rownames(stTest)] this was suggested code but did not work
+#expTest = expTMraw[commonGenes,stTrain$cell] this did not work down bellow because out of bound issue
+
+#predict
+classRes_val_all = scn_predict(cnProc=class_info[['cnProc']], expDat=expTest, nrand = 50)
+
+```
+
+#8_Assess classifier
+
+```{r}
+tm_heldoutassessment = assess_comm(ct_scores = classRes_val_all, stTrain = stTrain, 
+                                   stQuery = stTest, dLevelSID = "cell", 
+                                   classTrain = "cell_ontology_class", classQuery = "cell_ontology_class", nRand = 50)
+
+```
+
+```{r}
+plot_PRs(tm_heldoutassessment)
+```
+
+```{r}
+plot_metrics(tm_heldoutassessment)
+```
+
+#9_Classification result heatmap
+
+```{r}
+#Create a name vector label used later in classification heatmap where the values are cell types/ clusters and names are the sample names
+ 
+nrand = 50
+sla = as.vector(stTest$cell_ontology_class)
+names(sla) = as.vector(stTest$cell)
+slaRand = rep("rand", nrand) 
+names(slaRand) = paste("rand_", 1:nrand, sep='')
+sla = append(sla, slaRand) #include in the random cells profile created
+
+sc_hmClass(classMat = classRes_val_all,grps = sla, max=300, isBig=TRUE)
+```
+
+#10_Attribution plot
+
+```{r}
+plot_attr(classRes=classRes_val_all, sampTab=stTest, nrand=nrand, dLevel="cell_ontology_class", sid="cell")
+```
+
+#11_Viusalize average top pairs genes expression for training data
+
+```{r}
+gpTab = compareGenePairs(query_exp = expTest, training_exp = expTrain, 
+                         training_st = stTrain, classCol = "cell_ontology_class", 
+                         sampleCol = "cell", RF_classifier = class_info$cnProc$classifier, 
+                         numPairs = 20, trainingOnly= TRUE)
+
+train = findAvgLabel(gpTab = gpTab, stTrain = stTrain, dLevel = "cell_ontology_class")
+
+hm_gpa_sel(gpTab, genes = class_info$cnProc$xpairs, grps = train, maxPerGrp = 50)
+```
+
+#12_Apply to our data set -- the query data
+
+```{r}
+expPark = seurat$expDat 
+```
+
+```{r}
+nqRand = 50
+system.time(crParkall<-scn_predict(class_info[['cnProc']], expPark, nrand=nqRand))
+```
+
+```{r}
+sgrp = as.vector(stPark$seurat_clusters)
+names(sgrp) = as.vector(rownames(stPark))
+grpRand =rep("rand", nqRand)
+names(grpRand) = paste("rand_", 1:nqRand, sep='')
+sgrp = append(sgrp, grpRand)
+
+# heatmap classification result
+sc_hmClass(crParkall, sgrp, max=5000, isBig=TRUE, cCol=F, font=8)
+```
+
+```{r}
+FIG <- sc_hmClass(crParkall, sgrp, max=5000, isBig=TRUE, cCol=F, font=8)
+ggsave(FIG, filename="/Users/rafaelgodoy/Desktop/HeatPlot_mouse.png", width=12, height=7, dpi=900)
+```
+
+#13_Classification annotation assignment
+
+```{r}
+expPark = seurat$expDat 
+```
+
+```{r}
+system.time(crParkall<-scn_predict(class_info[['cnProc']], expPark, nrand = F))
+```
+
+```{r}
+#lets create a column in the stPark dataframe called SID with the rownames 
+stPark$SID <- as.vector(rownames(stPark))
+```
+
+```{r}
+# This classifies a cell with  the catgory with the highest classification score or higher than a classification score threshold of your choosing.
+# The annotation result can be found in a column named category in the query sample table.
+
+stPark <- get_cate(classRes = crParkall, sampTab = stPark, dLevel = "seurat_clusters", 
+                   sid = "SID", nrand = nqRand)
+stPark
+```
+
+###summary of clusters
+Cluster 0 = Endothelial Cells
+Cluster 1 = B cells
+Cluster 2 = T cells
+Cluster 3 = Alveolar Macrophage
+Cluster 4 = Leukocytes
+Cluster 5 = Myeloyd Cells
+Cluster 6 = Classical Monocytes
+Cluster 7 = Natural Killer Cells
+Cluster 8 = Stromal cells
+Cluster 9 = Endothelial cells
+Cluster 10 = Type II Pneumocytes
+Cluster 11 = Endothelial cells 
+Cluster 12 = Endothelial cells ?? stromal cells??
+Cluster 13 = Endothelial cells?? Bcells ?? Leukocytes
+Cluster 14 = Stromal Cells
+Cluster 15 = Myeloid Cells
+Cluster 16 = T cells?? 
+Cluster 17 = Type II pneumocytes
+Cluster 18 = B cells
+Cluster 19 = Mast Cells
+Cluster 20 = B cells 
+Cluster 21 = Endothelial cells 
+Cluster 22 = ???
+
+```{r}
+table(stPark[which(stPark$seurat_clusters == "0"), "category"])
+table(stPark[which(stPark$seurat_clusters == "1"), "category"])
+table(stPark[which(stPark$seurat_clusters == "2"), "category"])
+table(stPark[which(stPark$seurat_clusters == "3"), "category"])
+table(stPark[which(stPark$seurat_clusters == "4"), "category"])
+table(stPark[which(stPark$seurat_clusters == "5"), "category"])
+table(stPark[which(stPark$seurat_clusters == "6"), "category"])
+table(stPark[which(stPark$seurat_clusters == "7"), "category"])
+table(stPark[which(stPark$seurat_clusters == "8"), "category"])
+table(stPark[which(stPark$seurat_clusters == "9"), "category"])
+table(stPark[which(stPark$seurat_clusters == "10"), "category"])
+table(stPark[which(stPark$seurat_clusters == "11"), "category"])
+table(stPark[which(stPark$seurat_clusters == "12"), "category"])
+table(stPark[which(stPark$seurat_clusters == "13"), "category"])
+table(stPark[which(stPark$seurat_clusters == "14"), "category"])
+table(stPark[which(stPark$seurat_clusters == "15"), "category"])
+table(stPark[which(stPark$seurat_clusters == "16"), "category"])
+table(stPark[which(stPark$seurat_clusters == "17"), "category"])
+table(stPark[which(stPark$seurat_clusters == "18"), "category"])
+table(stPark[which(stPark$seurat_clusters == "19"), "category"])
+table(stPark[which(stPark$seurat_clusters == "20"), "category"])
+table(stPark[which(stPark$seurat_clusters == "21"), "category"])
+table(stPark[which(stPark$seurat_clusters == "22"), "category"])
+```
+
+#14_Classification result violin plot
+
+```{r}
+sc_violinClass(sampTab = stPark, classRes = crParkall, sid = "SID", dLevel = "seurat_clusters", ncol = 2)
+```
+
+```{r}
+FIG <- sc_violinClass(sampTab = stPark, classRes = crParkall, sid = "SID", dLevel = "seurat_clusters", ncol = 2)
+ggsave(FIG, filename="/Users/rafaelgodoy/Desktop/NomViolin_mouse.png", width=12, height=7, dpi=900)
+```
+
+
+#15_Skyline plot of classification results
+
+```{r}
+#stKid2 = addRandToSampTab(crParkall, stPark, "seurat_clusters", "SID")
+skylineClass(crParkall, "T cell", stKid2, "seurat_clusters",.25, "SID")
+```
+
+
+
+
+
+
+
+
