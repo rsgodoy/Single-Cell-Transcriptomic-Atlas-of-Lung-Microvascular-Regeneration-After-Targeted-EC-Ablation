@@ -3,8 +3,6 @@ title: "1a_QC_doublets_integration_global"
 output: html_notebook
 ---
 
-This notebook was run on desktop R v3.6
-
 ```{r}
 getwd()
 ```
@@ -21,7 +19,7 @@ library(tidyverse)
 #2_RDS
 
 ```{r}
-seurat <- readRDS("./0_raw_data_David_new_data_Nov_2020/seurat_filtered.rds")
+seurat <- readRDS("..... .rds")
 ```
 
 #3_Doublets and mito
@@ -40,13 +38,13 @@ hist(sce$scDblFinder.score, breaks=100)
 
 
 ```{r}
-seurat$Doublet <- sce$scDblFinder.score > 0.15 # Find this gives better results than the "nearestClass"
+seurat$Doublet <- sce$scDblFinder.score > 0.15 
 ```
 
 ```{r}
 doubletfig <- DimPlot(seurat, group.by="Doublet")
 doubletfig
-#ggsave(doubletfig, filename = "/Users/rafaelgodoy/Desktop/Doublets.png", width=12, height=8, dpi = 900)
+#ggsave(doubletfig, filename = "... .png", width=12, height=8, dpi = 900)
 ```
 
 ```{r}
@@ -75,7 +73,7 @@ seurat <- CellCycleScoring(seurat, s.features=cc.genes.updated.2019$s.genes,
 
 ```{r}
 cyclefig <- DimPlot(seurat, group.by="Phase")
-ggsave(cyclefig, filename = "/Users/rafaelgodoy/Desktop/CellCycle.png", width=12, height=8, dpi = 900)
+ggsave(cyclefig, filename = ".../ CellCycle.png", width=12, height=8, dpi = 900)
 cyclefig
 ```
 
@@ -131,7 +129,7 @@ DefaultAssay(seurat) <- "RNA" # We use the RNA for all quantitative downstream a
 ```
 
 ```{r}
-#saveRDS(seurat, file = "~/Projects/stewart_mouse/data/seurat_filtered_processed.rds")
+#saveRDS(seurat, file = "... .rds")
 ```
 
 
