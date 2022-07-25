@@ -15,7 +15,7 @@ library(Seurat)
 #1_RDS
 
 ```{r}
-seurat <- readRDS("./0_raw_data_David_new_data_Nov_2020/seurat_filtered_processed.rds")
+seurat <- readRDS("... .rds")
 ```
 
 ```{r}
