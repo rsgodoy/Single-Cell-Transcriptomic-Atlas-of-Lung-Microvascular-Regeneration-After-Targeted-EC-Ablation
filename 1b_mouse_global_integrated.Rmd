@@ -1,0 +1,87 @@
+---
+title: "1b_mouse_global_integrated"
+output: html_notebook
+---
+
+```{r}
+getwd()
+```
+
+
+```{r}
+library(Seurat)
+```
+
+#1_RDS
+
+```{r}
+seurat <- readRDS("./0_raw_data_David_new_data_Nov_2020/seurat_filtered_processed.rds")
+```
+
+```{r}
+DimPlot(seurat, label = TRUE)
+```
+
+```{r}
+DimPlot(seurat, group.by = "Sample")
+```
+
+```{r}
+FeaturePlot(seurat, features = "Ptprc", label = T)
+```
+
+```{r}
+FeaturePlot(seurat, features = "Cldn5", label = T)
+FeaturePlot(seurat, features = "Cdh5", label = T)
+FeaturePlot(seurat, features = "Kdr")
+```
+
+```{r}
+FeaturePlot(seurat, features = "Epcam", label = T)
+```
+
+```{r}
+FeaturePlot(seurat, features = "Apln")
+```
+
+```{r}
+FeaturePlot(seurat, features = "Foxm1")
+```
+
+```{r}
+FeaturePlot(seurat, features = "Mki67")
+```
+
+```{r}
+FeaturePlot(seurat, features = "Icam1")
+```
+
+
+
+#2_Total Cells
+
+```{r}
+seurat$Totalcells <- seurat$orig.ident
+seurat$Totalcells[seurat$orig.ident %in% c("PoolA", "PoolB", "PoolC")] <- "Cells"
+```
+
+#3_Graphing 
+
+##A_UMAP
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
