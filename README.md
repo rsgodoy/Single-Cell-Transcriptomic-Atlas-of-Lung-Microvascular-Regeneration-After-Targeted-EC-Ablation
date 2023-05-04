@@ -1,4 +1,4 @@
-# Single-Cell-Transcriptomic-Atlas-of-Lung-Microvascular-Regeneration-After-Targeted-Endothelial-Cell-Ablation
+# :blue_book: Single-Cell-Transcriptomic-Atlas-of-Lung-Microvascular-Regeneration-After-Targeted-Endothelial-Cell-Ablation
 
 ### This repository contains notebooks with codes used to generate some of the single cell transcriptomic analysis conducted in the article by Godoy et. al., 2023 - [https://doi.org/10.7554/eLife.80900](https://elifesciences.org/articles/80900) 
 
