@@ -1,12 +1,10 @@
 ---
 title: "1b_mouse_global_integrated"
-output: html_notebook
 ---
 
 ```{r}
 getwd()
 ```
-
 
 ```{r}
 library(Seurat)
@@ -55,8 +53,6 @@ FeaturePlot(seurat, features = "Mki67")
 ```{r}
 FeaturePlot(seurat, features = "Icam1")
 ```
-
-
 
 #2_Total Cells
 
