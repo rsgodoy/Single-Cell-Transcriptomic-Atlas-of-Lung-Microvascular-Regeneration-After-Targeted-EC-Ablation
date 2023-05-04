@@ -1,6 +1,5 @@
 ---
 title: "1c_mouse_global_single_cell_net"
-output: html_notebook
 ---
 
 #1_lib
@@ -214,5 +213,3 @@ ggsave(FIG, filename="... .png", width=12, height=7, dpi=900)
 #stKid2 = addRandToSampTab(crParkall, stPark, "seurat_clusters", "SID")
 skylineClass(crParkall, "T cell", stKid2, "seurat_clusters",.25, "SID")
 ```
-
-
