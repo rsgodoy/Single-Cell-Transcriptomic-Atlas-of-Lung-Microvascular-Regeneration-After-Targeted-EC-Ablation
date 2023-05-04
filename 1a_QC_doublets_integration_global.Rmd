@@ -1,12 +1,10 @@
 ---
 title: "1a_QC_doublets_integration_global"
-output: html_notebook
 ---
 
 ```{r}
 getwd()
 ```
-
 
 #1_lib
 
@@ -36,7 +34,6 @@ sce <- scDblFinder(sce, samples="orig.ident")
 hist(sce$scDblFinder.score, breaks=100)
 ```
 
-
 ```{r}
 seurat$Doublet <- sce$scDblFinder.score > 0.15 
 ```
@@ -59,7 +56,6 @@ seurat <- subset(seurat, cells=cells_keep)
 FeaturePlot(seurat, features="percent.mito")
 hist(seurat$percent.mito, breaks=100)
 ```
-percent mito is still a little problematic here. Will remove anything >20
 
 ```{r}
 seurat <- subset(seurat, subset= percent.mito < 20)
@@ -131,21 +127,3 @@ DefaultAssay(seurat) <- "RNA" # We use the RNA for all quantitative downstream a
 ```{r}
 #saveRDS(seurat, file = "... .rds")
 ```
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
