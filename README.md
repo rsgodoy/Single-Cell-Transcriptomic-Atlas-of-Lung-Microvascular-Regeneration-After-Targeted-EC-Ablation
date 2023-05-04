@@ -1,8 +1,8 @@
 # Single-Cell-Transcriptomic-Atlas-of-Lung-Microvascular-Regeneration-After-Targeted-Endothelial-Cell-Ablation
 
-## This repository contains notebooks with codes used to generate some of the single cell transcriptomic analysis conducted in the article by Godoy et. al., 2023 - [https://doi.org/10.7554/eLife.80900](https://elifesciences.org/articles/80900) 
+### This repository contains notebooks with codes used to generate some of the single cell transcriptomic analysis conducted in the article by Godoy et. al., 2023 - [https://doi.org/10.7554/eLife.80900](https://elifesciences.org/articles/80900) 
 
-## The sequencing data has been deposited in GEO under accession code [GSE211335](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE211335) - Godoy RS et.al., (2022) Single Cell Transcriptomic Atlas of Lung Microvascular Regeneration after Targeted Endothelial Cell Ablation NCBI Gene Expression Omnibus, GSE211335.
+### The sequencing data has been deposited in GEO under accession code [GSE211335](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE211335) - Godoy RS et.al., (2022) Single Cell Transcriptomic Atlas of Lung Microvascular Regeneration after Targeted Endothelial Cell Ablation NCBI Gene Expression Omnibus, GSE211335.
 
 ![Screen Shot 2023-05-04 at 9 49 04 AM](https://user-images.githubusercontent.com/53182920/236232011-5a5f5c12-9161-4379-91a7-f3866b23a97b.png)
 ![Screen Shot 2023-05-04 at 10 27 55 AM](https://user-images.githubusercontent.com/53182920/236238365-1f18d311-46ef-4bd6-848d-2e6c0abcb18c.png)
