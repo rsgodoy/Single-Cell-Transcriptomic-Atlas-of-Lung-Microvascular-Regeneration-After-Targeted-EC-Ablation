@@ -1,0 +1,1460 @@
+---
+title: "Global UMAP & Cell clustering & Subgrouping"
+output: html_notebook
+---
+______________________________
+______________________________
+### Global Data Mouse DT-ALI
+______________________________
+______________________________
+
+#1-Set up 
+```{r}
+setwd("...")
+getwd()
+
+library(Seurat)
+library(dplyr)
+library(magrittr)
+library(broom)
+library(tidyr)
+library(ggplot2)
+library(cowplot)
+library(Nebulosa)
+library(fgsea)
+library(muscat)
+library(SingleCellExperiment)
+library(scater)
+```
+
+
+#2-Loading total lung object 
+```{r}
+setwd("...")
+seurat <- readRDS(file = "Mouse_dt_global_processed_filtered.rds")
+
+DimPlot(seurat, label = TRUE)
+```
+
+```{r}
+DefaultAssay(seurat) <- "RNA"
+```
+
+
+#3-Visualize global cell populations
+
+###Group the UMAP by treatment group
+```{r}
+DimPlot(seurat, label = T)
+DimPlot(seurat, group.by = "Sample")
+DimPlot(seurat, split.by = "Sample")
+```
+
+#4-Global Population identification
+
+###Global populations Cldn5 - Endothelial, Epcam - Epithelial, Ptprc - Immune, Col1a1 - stromal (Acta2 - smooth muscle)
+```{r}
+FeaturePlot(seurat, features=c("Cldn5", "Epcam", "Ptprc", "Col1a1"),
+            cols = c('lightgrey', 'red'), label=F)
+```
+
+```{r}
+FeaturePlot(seurat, features = c("Epcam", "Sftpb"), label = T)
+```
+
+```{r}
+FeaturePlot(seurat, features = c("Cldn5", "Cdh5"), label = T)
+```
+
+```{r}
+global <- seurat
+```
+
+# Subset Analysis
+
+#5-Myeloid Subset
+
+```{r}
+#3_SUBSET OBJECT
+setwd("...")
+
+seurat <- subset(global, idents=c("3","4","5","9","12","19"))
+DimPlot(seurat, label = T)
+
+#4_Integrate Data
+options(future.globals.maxSize = +Inf)
+
+seurat.list <- SplitObject(seurat, split.by="Sample")
+
+for (i in 1:length(seurat.list)){ DefaultAssay(seurat.list[[i]]) <- "RNA"}
+for (i in 1:length(seurat.list)){
+  seurat.list[[i]] <- DietSeurat(seurat.list[[i]], assay = "RNA")}
+rm(i)
+
+for (i in 1:length(seurat.list)){
+  seurat.list[[i]] <- SCTransform(seurat.list[[i]], 
+                                  vars.to.regress=c("percent.mito", "S.Score","G2M.Score"), verbose=T)}
+
+seurat.features <- SelectIntegrationFeatures(object.list = seurat.list, nfeatures=3000)
+#seurat.list <- lapply(X = seurat.list, FUN = function(x) {x <- RunPCA(x, features = seurat.features, verbose = T)})
+seurat.list <- PrepSCTIntegration(object.list=seurat.list, 
+                                  anchor.features=seurat.features, 
+                                  verbose=T)
+
+#reference_dataset <- which(names(seurat.list) == c("E1_Ctrl", "E2_Ctrl"))
+#seurat.anchors <- FindIntegrationAnchors(object.list = seurat.list, normalization.method="SCT", reduction = "rpca", anchor.features=seurat.features, verbose=T, reference = reference_dataset)
+seurat.anchors <- FindIntegrationAnchors(object.list = seurat.list, normalization.method="SCT", anchor.features=seurat.features, verbose=F)
+```
+
+
+```{r}
+seurat.integrated <- IntegrateData(anchorset = seurat.anchors, normalization.method="SCT", verbose=T)
+
+seurat <- seurat.integrated
+rm(seurat.integrated)
+seurat <- RunPCA(seurat, verbose=F)
+seurat <- RunUMAP(seurat, dims=1:30)
+seurat <- FindNeighbors(seurat, dims=1:30)
+seurat <- FindClusters(seurat, resolution=0.25)
+
+setwd("...")
+
+saveRDS(seurat, file = "Myeloid_subset.rds")
+
+FigA <- DimPlot(seurat, label = F)
+FigB <- DimPlot(seurat, label = F, group.by = "Sample")
+
+setwd("...")
+
+ggsave(FigA, filename= "Myeloid_Lung_UMAP.png", width=12, height= 7, dpi=900)
+ggsave(FigB, filename= "Myeloid_Lung_UMAP_S.png", width=12, height= 7, dpi=900)
+```
+
+```{r}
+FigA
+FigB
+```
+
+```{r}
+## trying to re-embed the data
+setwd("...")
+seurat <- readRDS(file = "Myeloid_subset.rds")
+
+DefaultAssay(seurat) <- "RNA"
+seurat <- SCTransform(seurat, vars.to.regress=c("percent.mito", "S.Score", "G2M.Score"),
+  verbose=F)
+seurat <- RunPCA(seurat, verbose=F)
+seurat <- RunUMAP(seurat, dims=1:30)
+DimPlot(seurat, label=T)
+DimPlot(seurat, group.by="Sample")
+
+setwd("...")
+
+saveRDS(seurat, file = "Myeloid_subset_embed.rds")
+
+setwd("...")
+
+FigA <- DimPlot(seurat, label = F)
+FigB <- DimPlot(seurat, label = F, group.by = "Sample")
+
+ggsave(FigA, filename= "Myeloid_Lung_UMAP.png", width=12, height= 7, dpi=900)
+ggsave(FigB, filename= "Myeloid_Lung_UMAP_S.png", width=12, height= 7, dpi=900)
+```
+
+
+#6-Lymphoid Subset
+
+```{r}
+#3_SUBSET OBJECT
+setwd("...")
+
+seurat <- subset(global, idents=c("1","2","6"))
+DimPlot(seurat, label = T)
+
+#4_Integrate Data
+options(future.globals.maxSize = +Inf)
+
+seurat.list <- SplitObject(seurat, split.by="Sample")
+
+for (i in 1:length(seurat.list)){ DefaultAssay(seurat.list[[i]]) <- "RNA"}
+for (i in 1:length(seurat.list)){
+  seurat.list[[i]] <- DietSeurat(seurat.list[[i]], assay = "RNA")}
+rm(i)
+
+for (i in 1:length(seurat.list)){
+  seurat.list[[i]] <- SCTransform(seurat.list[[i]], 
+                                  vars.to.regress=c("percent.mito", "S.Score","G2M.Score"), verbose=T)}
+
+seurat.features <- SelectIntegrationFeatures(object.list = seurat.list, nfeatures=3000)
+#seurat.list <- lapply(X = seurat.list, FUN = function(x) {x <- RunPCA(x, features = seurat.features, verbose = T)})
+seurat.list <- PrepSCTIntegration(object.list=seurat.list, 
+                                  anchor.features=seurat.features, 
+                                  verbose=T)
+
+#reference_dataset <- which(names(seurat.list) == c("E1_Ctrl", "E2_Ctrl"))
+#seurat.anchors <- FindIntegrationAnchors(object.list = seurat.list, normalization.method="SCT", reduction = "rpca", anchor.features=seurat.features, verbose=T, reference = reference_dataset)
+seurat.anchors <- FindIntegrationAnchors(object.list = seurat.list, normalization.method="SCT", anchor.features=seurat.features, verbose=F)
+```
+
+
+```{r}
+seurat.integrated <- IntegrateData(anchorset = seurat.anchors, normalization.method="SCT", verbose=T)
+
+seurat <- seurat.integrated
+rm(seurat.integrated)
+seurat <- RunPCA(seurat, verbose=F)
+seurat <- RunUMAP(seurat, dims=1:30)
+seurat <- FindNeighbors(seurat, dims=1:30)
+seurat <- FindClusters(seurat, resolution=0.25)
+
+setwd("...")
+
+saveRDS(seurat, file = "Lymphoid_subset.rds")
+
+FigA <- DimPlot(seurat, label = F)
+FigB <- DimPlot(seurat, label = F, group.by = "Sample")
+
+setwd("...")
+
+ggsave(FigA, filename= "Lymphoid_Lung_UMAP.png", width=12, height= 7, dpi=900)
+ggsave(FigB, filename= "Lymphoid_Lung_UMAP_S.png", width=12, height= 7, dpi=900)
+```
+
+```{r}
+FigA
+FigB
+```
+
+```{r}
+## trying to re-embed the data
+setwd("...")
+seurat <- readRDS(file = "Lymphoid_subset.rds")
+
+DefaultAssay(seurat) <- "RNA"
+seurat <- SCTransform(seurat, vars.to.regress=c("percent.mito", "S.Score", "G2M.Score"),
+  verbose=F)
+seurat <- RunPCA(seurat, verbose=F)
+seurat <- RunUMAP(seurat, dims=1:30)
+DimPlot(seurat, label=T)
+DimPlot(seurat, group.by="Sample")
+
+setwd("...")
+
+saveRDS(seurat, file = "Lymphoid_subset_embed.rds")
+
+setwd("...")
+
+FigA <- DimPlot(seurat, label = F)
+FigB <- DimPlot(seurat, label = F, group.by = "Sample")
+
+ggsave(FigA, filename= "Lymphoid_Lung_UMAP.png", width=12, height= 7, dpi=900)
+ggsave(FigB, filename= "Lymphoid_Lung_UMAP_S.png", width=12, height= 7, dpi=900)
+```
+
+
+
+#7-Stromal Subset
+
+```{r}
+#3_SUBSET OBJECT
+setwd("...")
+
+seurat <- subset(global, idents=c("7","15","16"))
+DimPlot(seurat, label = T)
+
+#4_Integrate Data
+options(future.globals.maxSize = +Inf)
+
+seurat.list <- SplitObject(seurat, split.by="Sample")
+
+for (i in 1:length(seurat.list)){ DefaultAssay(seurat.list[[i]]) <- "RNA"}
+for (i in 1:length(seurat.list)){
+  seurat.list[[i]] <- DietSeurat(seurat.list[[i]], assay = "RNA")}
+rm(i)
+
+for (i in 1:length(seurat.list)){
+  seurat.list[[i]] <- SCTransform(seurat.list[[i]], 
+                                  vars.to.regress=c("percent.mito", "S.Score","G2M.Score"), verbose=T)}
+
+seurat.features <- SelectIntegrationFeatures(object.list = seurat.list, nfeatures=3000)
+#seurat.list <- lapply(X = seurat.list, FUN = function(x) {x <- RunPCA(x, features = seurat.features, verbose = T)})
+seurat.list <- PrepSCTIntegration(object.list=seurat.list, 
+                                  anchor.features=seurat.features, 
+                                  verbose=T)
+
+#reference_dataset <- which(names(seurat.list) == c("E1_Ctrl", "E2_Ctrl"))
+#seurat.anchors <- FindIntegrationAnchors(object.list = seurat.list, normalization.method="SCT", reduction = "rpca", anchor.features=seurat.features, verbose=T, reference = reference_dataset)
+seurat.anchors <- FindIntegrationAnchors(object.list = seurat.list, normalization.method="SCT", anchor.features=seurat.features, verbose=F)
+```
+
+
+```{r}
+seurat.integrated <- IntegrateData(anchorset = seurat.anchors, normalization.method="SCT", verbose=T)
+
+seurat <- seurat.integrated
+rm(seurat.integrated)
+seurat <- RunPCA(seurat, verbose=F)
+seurat <- RunUMAP(seurat, dims=1:30)
+seurat <- FindNeighbors(seurat, dims=1:30)
+seurat <- FindClusters(seurat, resolution=0.25)
+
+setwd("...")
+
+saveRDS(seurat, file = "Stromal_subset.rds")
+
+FigA <- DimPlot(seurat, label = F)
+FigB <- DimPlot(seurat, label = F, group.by = "Sample")
+
+setwd("...")
+
+ggsave(FigA, filename= "Stromal_Lung_UMAP.png", width=12, height= 7, dpi=900)
+ggsave(FigB, filename= "Stromal_Lung_UMAP_S.png", width=12, height= 7, dpi=900)
+```
+
+```{r}
+FigA
+FigB
+```
+
+```{r}
+## trying to re-embed the data
+setwd("...")
+seurat <- readRDS(file = "Stromal_subset.rds")
+
+DefaultAssay(seurat) <- "RNA"
+seurat <- SCTransform(seurat, vars.to.regress=c("percent.mito", "S.Score", "G2M.Score"),
+  verbose=F)
+seurat <- RunPCA(seurat, verbose=F)
+seurat <- RunUMAP(seurat, dims=1:30)
+DimPlot(seurat, label=T)
+DimPlot(seurat, group.by="Sample")
+
+setwd("...")
+
+saveRDS(seurat, file = "Stromal_subset_embed.rds")
+
+setwd("...")
+
+FigA <- DimPlot(seurat, label = F)
+FigB <- DimPlot(seurat, label = F, group.by = "Sample")
+
+ggsave(FigA, filename= "Stromal_Lung_UMAP.png", width=12, height= 7, dpi=900)
+ggsave(FigB, filename= "Stromal_Lung_UMAP_S.png", width=12, height= 7, dpi=900)
+```
+
+
+#8-Epithelial Subset
+
+```{r}
+#3_SUBSET OBJECT
+setwd("...")
+
+seurat <- subset(global, idents=c("10","13","17"))
+DimPlot(seurat, label = T)
+
+#4_Integrate Data
+options(future.globals.maxSize = +Inf)
+
+seurat.list <- SplitObject(seurat, split.by="Sample")
+
+for (i in 1:length(seurat.list)){ DefaultAssay(seurat.list[[i]]) <- "RNA"}
+for (i in 1:length(seurat.list)){
+  seurat.list[[i]] <- DietSeurat(seurat.list[[i]], assay = "RNA")}
+rm(i)
+
+for (i in 1:length(seurat.list)){
+  seurat.list[[i]] <- SCTransform(seurat.list[[i]], 
+                                  vars.to.regress=c("percent.mito", "S.Score","G2M.Score"), verbose=T)}
+
+seurat.features <- SelectIntegrationFeatures(object.list = seurat.list, nfeatures=3000)
+#seurat.list <- lapply(X = seurat.list, FUN = function(x) {x <- RunPCA(x, features = seurat.features, verbose = T)})
+seurat.list <- PrepSCTIntegration(object.list=seurat.list, 
+                                  anchor.features=seurat.features, 
+                                  verbose=T)
+
+#reference_dataset <- which(names(seurat.list) == c("E1_Ctrl", "E2_Ctrl"))
+#seurat.anchors <- FindIntegrationAnchors(object.list = seurat.list, normalization.method="SCT", reduction = "rpca", anchor.features=seurat.features, verbose=T, reference = reference_dataset)
+seurat.anchors <- FindIntegrationAnchors(object.list = seurat.list, normalization.method="SCT", anchor.features=seurat.features, verbose=F)
+```
+
+```{r}
+seurat.integrated <- IntegrateData(anchorset = seurat.anchors, normalization.method="SCT", verbose=T)
+
+seurat <- seurat.integrated
+rm(seurat.integrated)
+seurat <- RunPCA(seurat, verbose=F)
+seurat <- RunUMAP(seurat, dims=1:30)
+seurat <- FindNeighbors(seurat, dims=1:30)
+seurat <- FindClusters(seurat, resolution=0.25)
+
+setwd("...")
+
+saveRDS(seurat, file = "Epithelial_subset.rds")
+
+FigA <- DimPlot(seurat, label = F)
+FigB <- DimPlot(seurat, label = F, group.by = "Sample")
+
+setwd("...")
+
+ggsave(FigA, filename= "Epithelial_Lung_UMAP.png", width=12, height= 7, dpi=900)
+ggsave(FigB, filename= "Epithelial_Lung_UMAP_S.png", width=12, height= 7, dpi=900)
+```
+
+```{r}
+FigA
+FigB
+```
+
+```{r}
+## trying to re-embed the data
+setwd("...")
+seurat <- readRDS(file = "Epithelial_subset.rds")
+
+DefaultAssay(seurat) <- "RNA"
+seurat <- SCTransform(seurat, vars.to.regress=c("percent.mito", "S.Score", "G2M.Score"),
+  verbose=F)
+seurat <- RunPCA(seurat, verbose=F)
+seurat <- RunUMAP(seurat, dims=1:30)
+DimPlot(seurat, label=T)
+DimPlot(seurat, group.by="Sample")
+
+setwd("...")
+
+saveRDS(seurat, file = "Epithelial_subset_embed.rds")
+
+setwd("...")
+
+FigA <- DimPlot(seurat, label = F)
+FigB <- DimPlot(seurat, label = F, group.by = "Sample")
+
+ggsave(FigA, filename= "Epithelial_Lung_UMAP.png", width=12, height= 7, dpi=900)
+ggsave(FigB, filename= "Epithelial_Lung_UMAP_S.png", width=12, height= 7, dpi=900)
+```
+
+__________________________________
+__________________________________
+# Clustering 
+__________________________________
+__________________________________
+
+# Load all subset data
+```{r}
+setwd("...")
+seurat <- readRDS(file = "Mouse_dt_global_processed_filtered.rds")
+endothelial <- readRDS(file = "EC_seurat_integrated.rds")
+stromal <- readRDS(file = "Stromal_subset_embed.rds")
+myeloid <- readRDS(file = "Myeloid_subset_embed.rds")
+lymphoid <- readRDS(file = "Lymphoid_subset_embed_clean.rds")
+```
+
+```{r}
+epithelial <- subset(seurat, idents = c("10", "13", "17"))
+```
+
+# Add broad cluster IDs to subsets
+```{r}
+epithelial$broad.cluster <- Idents(seurat)[colnames(epithelial)]
+stromal$broad.cluster <- Idents(seurat)[colnames(stromal)]
+endothelial$broad.cluster <- Idents(seurat)[colnames(endothelial)]
+myeloid$broad.cluster <- Idents(seurat)[colnames(myeloid)]
+lymphoid$broad.cluster <- Idents(seurat)[colnames(lymphoid)]
+```
+
+```{r}
+DimPlot(epithelial, group.by="broad.cluster")
+DimPlot(stromal, group.by="broad.cluster")
+DimPlot(endothelial, group.by="broad.cluster")
+DimPlot(myeloid, group.by="broad.cluster")
+DimPlot(lymphoid, group.by="broad.cluster")
+```
+
+# Add high res clusters to global object
+
+```{r}
+epithelial_clusters <- data.frame(cell = colnames(epithelial),
+                                  cluster = paste0("Epithelial_", 
+                                                   epithelial$seurat_clusters))
+stromal_clusters <- data.frame(cell = colnames(stromal),
+                                  cluster = paste0("Stromal_", 
+                                                   stromal$seurat_clusters))
+endothelial_clusters <- data.frame(cell = colnames(endothelial),
+                                  cluster = paste0("Endothelial_", 
+                                                   endothelial$seurat_clusters))
+myeloid_clusters <- data.frame(cell = colnames(myeloid),
+                                  cluster = paste0("Myeloid_", 
+                                                   myeloid$seurat_clusters))
+lymphoid_clusters <- data.frame(cell = colnames(lymphoid),
+                                  cluster = paste0("Lymphoid_", 
+                                                   lymphoid$seurat_clusters))
+all_clusters <- bind_rows(epithelial_clusters, stromal_clusters, endothelial_clusters,
+                          myeloid_clusters, lymphoid_clusters)
+```
+
+```{r}
+seurat$cluster_high_res <- "Doublet"
+seurat$cluster_high_res[match(all_clusters$cell, colnames(seurat))] <- all_clusters$cluster
+```
+
+```{r}
+DimPlot(seurat, group.by = "cluster_high_res")
+```
+
+# Remove doublets & add cell types
+
+```{r}
+setwd("~/Documents/PhD - OHRI & University of Ottawa/scRNAseq/Mouse DT-ALI/output")
+annotation <- read.csv("mouse_cluster_annotations.csv", stringsAsFactors = F)
+annotation <- annotation[,1:3]
+annotation$tmp <- paste0(annotation$Subtype, "_", annotation$Cluster)
+```
+
+```{r}
+seurat$CellType <- "Doublet"
+seurat$CellType <- annotation$CellType[match(seurat$cluster_high_res, annotation$tmp)]
+```
+
+```{r}
+table(seurat$CellType)
+```
+
+###Remove remaining doublets
+
+```{r}
+cells_keep <- colnames(seurat)[seurat$CellType != "Doublet"]
+```
+
+```{r}
+seurat <- subset(seurat, cells = cells_keep)
+```
+
+```{r}
+seurat <- SCTransform(seurat, vars.to.regress=c("S.Score", "G2M.Score",
+                                                "percent.mito"))
+seurat <- RunPCA(seurat, verbose=F)
+seurat <- RunUMAP(seurat, dims=1:30)
+```
+
+###Re-level cell types
+
+```{r}
+annotation.new <- subset(annotation, CellType != "Doublet")
+```
+
+```{r}
+seurat$CellType <- factor(seurat$CellType, levels=annotation.new$CellType)
+Idents(seurat) <- seurat$CellType
+```
+
+```{r}
+DimPlot(seurat, label=T) + NoLegend()
+```
+
+```{r}
+DefaultAssay(seurat) <- "RNA"
+```
+
+```{r}
+setwd("...")
+saveRDS(seurat, file = "mouse_global_high_res.rds")
+```
+
+#Reload compiled data
+```{r}
+setwd("...")
+seurat <- readRDS(file = "mouse_global_high_res.rds")
+```
+
+```{r}
+DimPlot(seurat, label = T, repel = T, label.size = 3) + NoLegend()
+ggsave(filename = "Mouse Global HR DT-ALI.png", height = 6, width = 9, dpi = 300)
+```
+
+```{r}
+DefaultAssay(seurat) <- "RNA"
+```
+
+```{r}
+DimPlot(seurat, split.by = "Sample") + NoLegend()
+```
+
+```{r}
+DimPlot(seurat, label = F, group.by = "Sample", order = F,
+        cols = c("lightgrey", "darkgreen", "lightgrey", "lightgrey")) + NoLegend()
+```
+
+```{r}
+FeaturePlot(seurat, features = c("Cldn5"), cols = c("lightgrey","darkred"))
+FeaturePlot(seurat, features = c("Ptprc"), cols = c("lightgrey","darkred"))
+FeaturePlot(seurat, features = c("Epcam"), cols = c("lightgrey","darkred"))
+FeaturePlot(seurat, features = c("Col1a1"), cols = c("lightgrey","darkred"))
+FeaturePlot(seurat, features = c("Col1a2"), cols = c("lightgrey","darkred"))
+
+```
+
+```{r}
+DimPlot(seurat, label = T, repel = T) + NoLegend()
+ggsave(filename = "Mouse Hi Res Global.png", path = "...", width=12, height= 7, dpi=900) 
+```
+
+```{r}
+table(seurat$CellType)
+```
+
+```{r}
+seurat$Nmbr <- "None"
+seurat$Nmbr <- ifelse(seurat$CellType == "gCap", "0", seurat$Nmbr)
+seurat$Nmbr <- ifelse(seurat$CellType == "gCap-Trans.", "1", seurat$Nmbr)
+seurat$Nmbr <- ifelse(seurat$CellType == "aCap", "2", seurat$Nmbr)
+seurat$Nmbr <- ifelse(seurat$CellType == "gCap-EGR", "3", seurat$Nmbr)
+seurat$Nmbr <- ifelse(seurat$CellType == "Arterial", "4", seurat$Nmbr)
+seurat$Nmbr <- ifelse(seurat$CellType == "Venous", "5", seurat$Nmbr)
+seurat$Nmbr <- ifelse(seurat$CellType == "gCap-Cytoprotective", "6", seurat$Nmbr)
+seurat$Nmbr <- ifelse(seurat$CellType == "gCap-Prolif.", "7", seurat$Nmbr)
+seurat$Nmbr <- ifelse(seurat$CellType == "AT2 cell", "8", seurat$Nmbr)
+seurat$Nmbr <- ifelse(seurat$CellType == "Clara cell", "9", seurat$Nmbr)
+seurat$Nmbr <- ifelse(seurat$CellType == "AT1 cell", "10", seurat$Nmbr)
+seurat$Nmbr <- ifelse(seurat$CellType == "B-cell 1", "11", seurat$Nmbr)
+seurat$Nmbr <- ifelse(seurat$CellType == "NK cell", "12", seurat$Nmbr)
+seurat$Nmbr <- ifelse(seurat$CellType == "Cd4+ T cell", "13", seurat$Nmbr)
+seurat$Nmbr <- ifelse(seurat$CellType == "Cd8+ T cell", "14", seurat$Nmbr)
+seurat$Nmbr <- ifelse(seurat$CellType == "Mixed T cell", "15", seurat$Nmbr)
+seurat$Nmbr <- ifelse(seurat$CellType == "B-cell 2", "16", seurat$Nmbr)
+seurat$Nmbr <- ifelse(seurat$CellType == "B-cell 3", "17", seurat$Nmbr)
+seurat$Nmbr <- ifelse(seurat$CellType == "Pre-T cell", "18", seurat$Nmbr)
+seurat$Nmbr <- ifelse(seurat$CellType == "Neutrophils", "19", seurat$Nmbr)
+seurat$Nmbr <- ifelse(seurat$CellType == "Alv. Mac", "20", seurat$Nmbr)
+seurat$Nmbr <- ifelse(seurat$CellType == "Int. Mac", "21", seurat$Nmbr)
+seurat$Nmbr <- ifelse(seurat$CellType == "Classical Mono", "22", seurat$Nmbr)
+seurat$Nmbr <- ifelse(seurat$CellType == "NC Mono", "23", seurat$Nmbr)
+seurat$Nmbr <- ifelse(seurat$CellType == "Trans. Mono", "24", seurat$Nmbr)
+seurat$Nmbr <- ifelse(seurat$CellType == "Mono-DC", "25", seurat$Nmbr)
+seurat$Nmbr <- ifelse(seurat$CellType == "Cd103+ cDC", "26", seurat$Nmbr)
+seurat$Nmbr <- ifelse(seurat$CellType == "Mast cell", "27", seurat$Nmbr)
+seurat$Nmbr <- ifelse(seurat$CellType == "Mreg+ DC", "28", seurat$Nmbr)
+seurat$Nmbr <- ifelse(seurat$CellType == "Col13a1+ Fib", "29", seurat$Nmbr)
+seurat$Nmbr <- ifelse(seurat$CellType == "Matrix Fib", "30", seurat$Nmbr)
+seurat$Nmbr <- ifelse(seurat$CellType == "Pericytes", "31", seurat$Nmbr)
+seurat$Nmbr <- ifelse(seurat$CellType == "Mesothelial", "32", seurat$Nmbr)
+seurat$Nmbr <- ifelse(seurat$CellType == "Col14a1+ Fib", "33", seurat$Nmbr)
+seurat$Nmbr <- ifelse(seurat$CellType == "SMC", "34", seurat$Nmbr)
+```
+
+```{r}
+table(seurat$Nmbr)
+```
+
+```{r}
+order_nmbrs <- c("34","33", "32","31", "30", "29", "28","27", "26","25",
+                 "24","23", "22","21","20","19","18","17","16","15","14",
+                 "13","12", "11","10","9","8","7","6","5","4","3","2","1","0")
+```
+
+```{r}
+DimPlot(seurat, label = T, repel = T, group.by = "CellType") + NoLegend()
+DimPlot(seurat, label = T, repel = T, group.by = "Nmbr", order = order_nmbrs)
+```
+
+```{r}
+DimPlot(seurat, label = T, repel = T, group.by = "Nmbr", order = order_nmbrs) + NoLegend()
+ggsave(filename = "Mouse Hi Res Global-Nmbr.png", path = "...", width=12, height= 7, dpi=900) 
+```
+
+```{r}
+FeaturePlot(seurat, features = c("Tm4sf1"), label=T) + NoLegend()
+plot_density(seurat, c("Tm4sf1", "Fn1"), joint = T)
+```
+
+```{r}
+VlnPlot(seurat, features = c("Tm4sf1"), ncol = 1) + NoLegend()
+VlnPlot(seurat, features = c("Vegfa"), split.by="Sample") + NoLegend()
+```
+
+```{r}
+plot_density(seurat, c("Cd8a", "Ccr7"), joint = T, combine = T)
+```
+
+# Augur - Cell Prioritization
+
+```{r}
+devtools::install_github("Bioconductor/MatrixGenerics")
+devtools::install_github("const-ae/sparseMatrixStats")
+devtools::install_github("neurorestore/Augur")
+```
+
+```{r}
+library(Augur)
+augurALL = calculate_auc(seurat, meta, cell_type_col = "CellType", label_col = "Sample")
+augurALL$AUC
+```
+
+```{r}
+ggplot(data=augurALL$AUC, aes(x=cell_type, y=auc)) + geom_point()
+```
+
+# Figure Generation - UMAP by timepoints
+
+```{r}
+my_cols <- c("#2E7DB6", "lightgrey", "lightgrey", "lightgrey")
+plot_ctrl <- DimPlot(seurat, group.by = "Sample", cols = alpha(my_cols, 0.3), pt.size = 1)
+plot_ctrl
+ggsave(filename="HR Global UMAP-Ctrl.png", height = 6, width = 9, dpi = 300)
+```
+
+```{r}
+my_cols <- c("lightgrey", "#3C9665", "lightgrey", "lightgrey")
+plot_3d <- DimPlot(seurat, group.by = "Sample", cols = alpha(my_cols, 0.33)) + NoLegend()
+plot_3d
+ggsave(filename="HR Global UMAP-3d.png", height = 6, width = 9, dpi = 300)
+```
+
+```{r}
+my_cols <- c("lightgrey", "lightgrey", "#D64D5B", "lightgrey")
+plot_5d <- DimPlot(seurat, group.by = "Sample", cols = alpha(my_cols, 0.33)) + NoLegend()
+plot_5d
+ggsave(filename="HR Global UMAP-5d.png", height = 6, width = 9, dpi = 300)
+```
+
+```{r}
+my_cols <- c("lightgrey", "lightgrey", "lightgrey", "#A691B5")
+plot_7d <- DimPlot(seurat, group.by = "Sample", cols = alpha(my_cols, 0.33)) + NoLegend()
+plot_7d
+ggsave(filename="HR Global UMAP-7d.png", height = 6, width = 9, dpi = 300)
+```
+
+#Split seurat object by timepoint
+```{r}
+seurat_cont <- subset(seurat, Sample == "Ctrl")
+seurat_3d <- subset(seurat, Sample == "DPT_3d")
+seurat_5d <- subset(seurat, Sample == "DPT_5d")
+seurat_7d <- subset(seurat, Sample == "DTP_7d")
+```
+
+###Extract necessary data
+```{r}
+data_cont <- seurat_cont@meta.data
+data_cont$UMAP1 <- Embeddings(seurat_cont, reduction="umap")[,1]
+data_cont$UMAP2 <- Embeddings(seurat_cont, reduction="umap")[,2]
+
+data_3d <- seurat_3d@meta.data
+data_3d$UMAP1 <- Embeddings(seurat_3d, reduction="umap")[,1]
+data_3d$UMAP2 <- Embeddings(seurat_3d, reduction="umap")[,2]
+
+data_5d <- seurat_5d@meta.data
+data_5d$UMAP1 <- Embeddings(seurat_5d, reduction="umap")[,1]
+data_5d$UMAP2 <- Embeddings(seurat_5d, reduction="umap")[,2]
+
+data_7d <- seurat_7d@meta.data
+data_7d$UMAP1 <- Embeddings(seurat_7d, reduction="umap")[,1]
+data_7d$UMAP2 <- Embeddings(seurat_7d, reduction="umap")[,2]
+```
+
+```{r}
+data_seurat <- seurat@meta.data
+data_seurat$UMAP1 <- Embeddings(seurat, reduction="umap")[,1]
+data_seurat$UMAP2 <- Embeddings(seurat, reduction="umap")[,2]
+```
+
+#Plot
+##First plot for Ctrl
+```{r}
+plot_combined_HR <-   
+  ggplot(data_seurat, aes(x=UMAP1, y=UMAP2)) +
+  geom_point(data=data_3d, aes(color=seurat$Sample=="DPT_3d"), size=1.5, alpha=0.5, color='lightgrey', shape=16) +
+  geom_point(data=data_5d, aes(color=seurat$Sample=="DPT_5d"), size=1.5, alpha=0.5, color='lightgrey', shape=16) +
+  geom_point(data=data_7d, aes(color=seurat$Sample=="DTP_7d"), size=1.5, alpha=0.5, color='lightgrey', shape=16) +
+  geom_point(data=data_cont, aes(color=seurat$Sample=="Ctrl"), size=1.5, alpha=0.5, color='#2E7DB6', shape=16) +
+  theme_void() +
+  theme(legend.position="right")
+
+ggsave(filename="HR Global UMAP-Ctrl_v2.png", height = 6, width = 9, dpi = 300)
+
+plot_combined_HR
+```
+
+##3d
+```{r}
+plot_combined_HR <-   
+  ggplot(data_seurat, aes(x=UMAP1, y=UMAP2)) +
+  geom_point(data=data_cont, aes(color=seurat$Sample=="Ctrl"), size=1.5, alpha=0.5, color='lightgrey', shape=16) +
+  geom_point(data=data_5d, aes(color=seurat$Sample=="DPT_5d"), size=1.5, alpha=0.5, color='lightgrey', shape=16) +
+  geom_point(data=data_7d, aes(color=seurat$Sample=="DTP_7d"), size=1.5, alpha=0.5, color='lightgrey', shape=16) +
+  geom_point(data=data_3d, aes(color=seurat$Sample=="DPT_3d"), size=1.5, alpha=0.5, color='#3C9665', shape=16) +
+  theme_void() +
+  theme(legend.position="right")
+
+ggsave(filename="HR Global UMAP-3d_v2.png", height = 6, width = 9, dpi = 300)
+
+plot_combined_HR
+```
+
+##5d
+```{r}
+plot_combined_HR <-   
+  ggplot(data_seurat, aes(x=UMAP1, y=UMAP2)) +
+  geom_point(data=data_3d, aes(color=seurat$Sample=="DPT_3d"), size=1.5, alpha=0.5, color='lightgrey', shape=16) +
+  geom_point(data=data_cont, aes(color=seurat$Sample=="Ctrl"), size=1.5, alpha=0.5, color='lightgrey', shape=16) +
+  geom_point(data=data_7d, aes(color=seurat$Sample=="DTP_7d"), size=1.5, alpha=0.5, color='lightgrey', shape=16) +
+  geom_point(data=data_5d, aes(color=seurat$Sample=="DPT_5d"), size=1.5, alpha=0.5, color='#D64D5B', shape=16) +
+  theme_void() +
+  theme(legend.position="right")
+
+ggsave(filename="HR Global UMAP-5d_v2.png", height = 6, width = 9, dpi = 300)
+
+plot_combined_HR
+```
+
+##7d
+```{r}
+plot_combined_HR <-   
+  ggplot(data_seurat, aes(x=UMAP1, y=UMAP2)) +
+  geom_point(data=data_3d, aes(color=seurat$Sample=="DPT_3d"), size=1.5, alpha=0.5, color='lightgrey', shape=16) +
+  geom_point(data=data_5d, aes(color=seurat$Sample=="DPT_5d"), size=1.5, alpha=0.5, color='lightgrey', shape=16) +
+  geom_point(data=data_cont, aes(color=seurat$Sample=="Ctrl"), size=1.5, alpha=0.5, color='lightgrey', shape=16) +
+  geom_point(data=data_7d, aes(color=seurat$Sample=="DTP_7d"), size=1.5, alpha=0.5, color='#A691B5', shape=16) +
+  theme_void() +
+  theme(legend.position="right")
+
+ggsave(filename="HR Global UMAP-7d_v2.png", height = 6, width = 9, dpi = 300)
+
+plot_combined_HR
+```
+
+
+##3,5,7 merged
+```{r}
+plot_combined_HR <-   
+  ggplot(data_seurat, aes(x=UMAP1, y=UMAP2)) +
+  geom_point(data=data_cont, aes(color=seurat$Sample=="Ctrl"), size=1.5, alpha=0.5, color='lightgrey', shape=16) +
+  geom_point(data=data_3d, aes(color=seurat$Sample=="DPT_3d"), size=1.5, alpha=0.35, color='#3C9665', shape=16) +
+  geom_point(data=data_5d, aes(color=seurat$Sample=="DPT_5d"), size=1.5, alpha=0.35, color='#D64D5B', shape=16) +
+  geom_point(data=data_7d, aes(color=seurat$Sample=="DTP_7d"), size=1.5, alpha=0.35, color='#A691B5', shape=16) +
+  theme_void() +
+  theme(legend.position="right")
+
+ggsave(filename="HR Global UMAP-3-5-7merge.png", height = 6, width = 9, dpi = 300)
+
+plot_combined_HR
+```
+__________________________
+__________________________
+#Mouse ENDOTHELIAL SUBSET
+__________________________
+__________________________
+
+
+# Load rds file for endothelial subcluster
+```{r}
+setwd("...")
+seurat <- readRDS(file = "EC_seurat_integrated.rds")
+
+DimPlot(seurat, label = TRUE)
+```
+
+```{r}
+DimPlot(seurat, split.by="Sample")
+```
+
+
+```{r}
+DefaultAssay(seurat) <- "RNA"
+```
+
+```{r}
+FeaturePlot(seurat, features = c("Cd36", "Itga1", "Kit"), order=T)
+FeaturePlot(seurat, features = c("Cd36", "Itga1", "Kit"), order=T, split.by = "Sample")
+```
+
+
+```{r}
+FeaturePlot(seurat, features = c("Spcs2", "Calm3", "Smad6", "Tns1"), order = T, split.by="Sample")
+```
+
+```{r}
+FeaturePlot(seurat, features = c("Nrp1", "Bmpr2", "Zbtb20"), order=T, split.by="Sample")
+```
+
+```{r}
+FeaturePlot(seurat, features = "Klf2", order=T, split.by="Sample")
+```
+
+```{r}
+FeaturePlot(seurat, features = "Rgs6")
+```
+
+```{r}
+FeaturePlot(seurat, feature = c("S.Score", "G2M.Score"), blend= T, cols = c("Red", "Blue"))
+DimPlot(seurat, group.by = "Phase")
+
+```
+
+```{r}
+FeaturePlot(seurat, features = c("Casp3", "Cdh5"), order=T)
+```
+
+
+```{r}
+FeaturePlot(seurat, features = c("Casp3", "Cdh5"), blend = T, order = T,  cols = c("lightgrey","Red", "Blue"), blend.threshold=0.1, max.cutoff = 'q8') &
+  theme(text = element_text(size = 7),
+        axis.text = element_text(size = 7))
+ggsave(filename = "Casp3-Cdh5-blend.png", height = 3, width = 8.5, dpi = 900)
+```
+
+```{r}
+r <- DotPlot(seurat, features = c("Casp3"), split.by = "Sample", cols = c("black", "blue", "yellow", "green"))
+r
+```
+
+```{r}
+r$data
+```
+
+___________________________
+___________________________
+#Mouse Stromal Cell subset 
+___________________________
+___________________________
+
+# Load rds file for stromal subcluster
+
+```{r}
+setwd("...")
+seurat <- readRDS(file = "Stromal_subset_embed.rds")
+
+DimPlot(seurat, label = TRUE)
+```
+
+```{r}
+DimPlot(seurat, label = F)
+DimPlot(seurat, label = T)
+```
+
+```{r}
+DimPlot(seurat, split.by = "Sample", label = F)
+```
+
+# Cluster Refinement
+
+```{r}
+DefaultAssay(seurat) <- "RNA"
+```
+
+```{r}
+cluster_markers <- FindAllMarkers(seurat,
+                                  logfc.threshold = 0.5, #To test all possible genes (very slow), set this to 0
+                                  only.pos = T) #and set this to F
+```
+
+###Then identify the top 10 markers
+```{r}
+cluster_markers %>%
+  group_by(cluster) %>%
+  top_n(10, avg_log2FC)
+```
+###Heatmap of top 5 genes
+
+```{r}
+top_genes <- cluster_markers %>% 
+  group_by(cluster) %>% 
+  top_n(5, avg_log2FC)
+```
+
+```{r}
+cluster.average <- AverageExpression(seurat, features = top_genes$gene, return.seurat = T)
+```
+
+```{r}
+mapal <- colorRampPalette(RColorBrewer::brewer.pal(11,"RdBu"))(256)
+Hm <- DoHeatmap(cluster.average, features = top_genes$gene, slot = "scale.data", angle = 90, draw.lines = F, size = 3) + scale_fill_gradientn(colours = rev(mapal))
+```
+
+```{r}
+setwd("...")
+ggsave(Hm, filename = "Stomal_nomeso_heatmap.png", width = 5, height = 11, dpi = 900)
+```
+
+
+```{r}
+install.packages("viridis")
+```
+
+```{r}
+library(viridis)
+```
+
+```{r}
+DoHeatmap(cluster.average, features = top_genes$gene, slot = "scale.data", angle = 90, draw.lines = F, size = 3) + scale_fill_viridis(option = "A")
+```
+
+## Acta2+ Pericytes
+```{r}
+FeaturePlot(seurat, features = c("Mustn1", "Des", "Acta2", "Myh11", "Tagln", "Tpm2"), order = T)
+VlnPlot(seurat, features = c("Mustn1", "Des", "Acta2", "Myh11", "Tagln", "Tpm2"), split.by = "Sample")
+```
+
+## Pericytes
+```{r}
+FeaturePlot(seurat, features = c("Gucy1a1", "Pdzd2", "Gucy1b1", "Ndufa4l2", "Vtn", "Cspg4"), order = T)
+```
+
+```{r}
+FeaturePlot(seurat, features = c("Cspg4","Des","Rgs5","Pdgfrb","Mcam"), order = T, label = T)
+VlnPlot(seurat, features = c("Cspg4","Des","Rgs5","Pdgfrb","Mcam"), ncol =5)
+```
+
+```{r}
+FeaturePlot(seurat, features = c("Pdgfra", "Pdgfrb"), order = T)
+VlnPlot(seurat, features = c("Pdgfra", "Pdgfrb"))
+```
+
+## Fibroblasts
+
+```{r}
+FeaturePlot(seurat, features = c("Col13a1", "Col14a1", "Col1a1"), order = T)
+```
+
+```{r}
+FeaturePlot(seurat, features = c("Mt1", "Mt2", "Hp", "Timp1", "Tagln"), order = T)
+```
+
+## Mesothelial
+
+```{r}
+FeaturePlot(seurat, features = "Msln", order = T)
+```
+
+# Cluster Plots
+```{r}
+FeaturePlot(seurat, features = c("Cspg4", "Pdzd2", "Acta2", "Des", "Tagln", "Pdgfrb", "Pdgfra", "Col13a1", "Col14a1",  "Msln"), order = T, ncol =5)
+#setwd("~/Documents/PhD - OHRI & University of Ottawa/scRNAseq/Mouse DT-ALI/output/figures/")
+#ggsave(filename = "Stromal_feature-plots.png", width = 9, height = 9, dpi = 900)
+```
+
+_____________________________
+_____________________________
+#Mouse Myeloid Subset
+_____________________________
+_____________________________
+
+# Load rds file for endothelial subcluster
+```{r}
+setwd("....")
+seurat <- readRDS(file = "Myeloid_subset_embed.rds")
+
+DimPlot(seurat, label = TRUE)
+```
+
+```{r}
+DimPlot(seurat, split.by = "Sample")
+DimPlot(seurat, group.by = "Sample", cols = c("skyblue3", "palegreen3", "indianred3", "plum3"))
+```
+
+```{r}
+DefaultAssay(seurat) <- "RNA"
+```
+
+# Identiftying clusters
+
+## Neutrophils
+```{r}
+FeaturePlot(seurat, features = c("S100a9","S100a8","Stfa2","Retnlg"))
+```
+
+## Macrophages
+
+```{r}
+FeaturePlot(seurat, features = "Cd68", order = T, label = T)
+```
+### Monocyte subtypes
+
+```{r}
+FeaturePlot(seurat, features = c("Cd14", "Fcgr3", "Dab2", "Plac8"), order = T, label = T)
+```
+
+```{r}
+FeaturePlot(seurat, feature = c("Cd14","Fcgr3"), label = T, order = T, split.by = "Sample")
+```
+#Ly6c2 and Ccr2 for classical
+#Fcgr4 for non-classical
+```{r}
+FeaturePlot(seurat, features = c("Ly6c2", "Ccr2", "Fcgr4"), order = T)
+```
+
+#Interstitial Macs
+
+```{r}
+FeaturePlot(seurat, feature = c( "C1qa", "Ms4a7", "Cd74", "H2-Aa"), label = T, order = T)
+```
+
+### Alveolar macrophages
+
+```{r}
+FeaturePlot(seurat, feature = c("Bhlhe41", "Lpl", "Plet1", "Mrc1"), label = TRUE, order = TRUE)
+```
+
+```{r}
+FeaturePlot(seurat, feature = "Olr1")
+```
+
+```{r}
+FeaturePlot(seurat, feature = c("Itgax","Ca4","Marco","Csf2rb"), order = T)
+```
+
+#Proliferation Markers
+```{r}
+FeaturePlot(seurat, feature = c("Mki67","Birc5","Cdca8","Top2a"), label=T, order=T)
+```
+
+```{r}
+FeaturePlot(seurat, features = "Mki67", order = T, split.by="Sample")
+```
+
+## Dendritic Cells
+```{r}
+FeaturePlot(seurat, feature = c("Siglech", "Flt3", "Zbtb46","Mreg"), label = F, order = TRUE)
+```
+
+```{r}
+FeaturePlot(seurat, features = c("Xcr1", "Mreg", "H2-Aa", "H2-Eb1"), order = T)
+```
+
+```{r}
+FeaturePlot(seurat, features = "Cd209a", order = T)
+```
+
+```{r}
+FeaturePlot(seurat, features = c("Ccl17", "Cyb561a3"), order = T)
+```
+
+```{r}
+FeaturePlot(seurat, features = c("Itgam","Itgae","Fcgr1","Itgax"), order = T)
+```
+
+```{r}
+FeaturePlot(seurat, features=c("Batf3","Clec10a", "Cst3"),label=T, order=T)
+```
+
+```{r}
+FeaturePlot(seurat, features = c("Epsti1", "Fscn1","Ccr7","Traf1"), order = T)
+```
+
+## Mast or Basophils
+
+```{r}
+FeaturePlot(seurat, feature = c("Cpa3", "Mcpt4", "Mcpt8l3", "Cma1"), label = TRUE, order = TRUE)
+```
+
+```{r}
+FeaturePlot(seurat, features = c("Ccl3", "Ccl4", "Il6", "Ifitm1"), order = T)
+```
+
+# FeaturePlots for myeloid discrimination
+
+```{r}
+FeaturePlot(seurat, features = c("Marco", "S100a9", "Fcgr3", "Cd14", "Ly6c2", "Fcgr4",
+                                 "H2-Aa", "C1qa", "Mreg", "Cd209a", "Itgae", "Cpa3"), ncol = 6, order=T)
+```
+
+# Differential gene expression of Myleoid Cells
+
+```{r}
+cluster_markers <- FindAllMarkers(seurat,
+                                  logfc.threshold = 0.5, #To test all possible genes (very slow), set this to 0
+                                  only.pos = T) #and set this to F
+```
+
+```{r}
+cluster_markers %>%
+  group_by(cluster) %>%
+  top_n(20, avg_log2FC)
+```
+
+```{r}
+setwd("...")
+cluster_markers_10 <- cluster_markers %>%
+  group_by(cluster) %>%
+  top_n(10, avg_log2FC)
+write.csv(cluster_markers_10, file = "cluster_markers_myeloid.csv")
+```
+
+Plot the top gene from every cluster
+```{r}
+top_genes <- cluster_markers %>% 
+  group_by(cluster) %>% 
+  top_n(5, avg_log2FC) %>% 
+  pull(gene)
+```
+
+_______________________
+_______________________
+#Mouse Lymphoid Subset
+_______________________
+_______________________
+
+# Load rds file for endothelial subcluster
+```{r}
+setwd("...")
+seurat <- readRDS(file = "Lymphoid_subset_embed.rds")
+
+DimPlot(seurat, label = TRUE)
+```
+
+```{r}
+DimPlot(seurat, split.by = "Sample")
+DimPlot(seurat, group.by = "Sample")
+DimPlot(seurat, group.by = "Sample", cols = c("skyblue3", "palegreen3", "indianred3", "plum3"))
+```
+
+```{r}
+DefaultAssay(seurat) <- "RNA"
+```
+
+
+# Identiftying clusters
+
+```{r}
+FeaturePlot(seurat, features = c("Cd3d", "Nkg7", "Cd79b"), label =T, order=T, ncol=3)
+```
+#Proliferation Markers
+```{r}
+FeaturePlot(seurat, feature = c("Mki67","Birc5","Cdca8","Top2a"), order=T)
+VlnPlot(seurat, features = "Mki67", split.by = "Sample")
+```
+
+# Contaminates
+```{r}
+DimPlot(seurat, cols = c("lightgrey", "lightgrey", "lightgrey", "lightgrey", "lightgrey",
+                         "red", "lightgrey", "lightgrey", "lightgrey", "lightgrey",
+                         "lightgrey"))
+DimPlot(seurat, cols = c("lightgrey", "lightgrey", "lightgrey", "lightgrey", "lightgrey",
+                         "lightgrey", "lightgrey", "red", "lightgrey", "lightgrey",
+                         "lightgrey"))
+DimPlot(seurat, cols = c("lightgrey", "lightgrey", "lightgrey", "lightgrey", "lightgrey",
+                         "lightgrey", "red", "lightgrey", "lightgrey", "lightgrey",
+                         "lightgrey"))
+DimPlot(seurat, cols = c("lightgrey", "lightgrey", "lightgrey", "lightgrey", "lightgrey",
+                         "lightgrey", "lightgrey", "lightgrey", "lightgrey", "red",
+                         "lightgrey"))
+```
+
+
+## Cluster 6 
+```{r}
+FeaturePlot(seurat, features = c("Ptprc", "Cldn5"), order = T)
+```
+
+## Cluster 9 - Stromal (fibroblast/ SMC) - ECM secreting cells
+```{r}
+FeaturePlot(seurat, features = c("Mgp", "Bgn", "Ogn", "Fn1"), order = T)
+```
+
+## Cluster 10 - platelets
+```{r}
+FeaturePlot(seurat, features = c("Ppbp", "Pf4"))
+```
+
+# Clean-up 
+```{r}
+seurat.tmp <- subset(seurat, idents = c("0", "1", "2", "3", "4", "5", "7", "8"))
+
+DimPlot(seurat.tmp, label = T)
+```
+
+# Integrate data
+
+```{r}
+seurat.list <- SplitObject(seurat.tmp, split.by="Sample")
+
+for (i in 1:length(seurat.list)){ DefaultAssay(seurat.list[[i]]) <- "RNA"}
+for (i in 1:length(seurat.list)){
+  seurat.list[[i]] <- DietSeurat(seurat.list[[i]], assay = "RNA")}
+rm(i)
+
+for (i in 1:length(seurat.list)){seurat.list[[i]] <- SCTransform(seurat.list[[i]], vars.to.regress=c("percent.mito", "S.Score", "G2M.Score"), verbose=T)}
+```
+
+```{r}
+seurat.features <- SelectIntegrationFeatures(object.list = seurat.list, nfeatures=3000)
+seurat.list <- PrepSCTIntegration(object.list=seurat.list, 
+                                  anchor.features=seurat.features, 
+                                  verbose=T)
+```
+
+```{r}
+seurat.anchors <- FindIntegrationAnchors(object.list = seurat.list, normalization.method="SCT", anchor.features=seurat.features, verbose=F)
+```
+
+```{r}
+seurat.integrated <- IntegrateData(anchorset = seurat.anchors, normalization.method="SCT", verbose=T)
+```
+
+```{r}
+seurat.tmp <- seurat.integrated
+rm(seurat.integrated)
+seurat.tmp <- RunPCA(seurat.tmp, verbose=F)
+seurat.tmp <- RunUMAP(seurat.tmp, dims=1:30)
+seurat.tmp <- FindNeighbors(seurat.tmp, dims=1:30)
+seurat.tmp <- FindClusters(seurat.tmp, resolution=0.25)
+
+DimPlot(seurat.tmp, label=T)
+```
+
+```{r}
+DimPlot(seurat.tmp, label=T, group.by = "Sample")
+```
+
+# Re-embed
+```{r}
+DefaultAssay(seurat.tmp) <- "RNA"
+seurat.tmp <- SCTransform(seurat.tmp, vars.to.regress=c("percent.mito", "S.Score", "G2M.Score"),
+  verbose=F)
+seurat.tmp <- RunPCA(seurat.tmp, verbose=F)
+seurat.tmp <- RunUMAP(seurat.tmp, dims=1:30)
+
+DimPlot(seurat.tmp, label=T)
+```
+
+```{r}
+DimPlot(seurat.tmp, label=T, group.by = "Sample")
+```
+
+
+```{r}
+seurat <- seurat.tmp
+rm(seurat.tmp)
+```
+
+
+```{r}
+setwd("...")
+saveRDS(seurat, file = "Lymphoid_subset_embed_clean.rds")
+```
+
+
+# New Starting Point
+
+```{r}
+DimPlot(seurat, label = T)
+DimPlot(seurat, label = T, split.by = "Sample")
+DimPlot(seurat, group.by = "Sample")
+```
+```{r}
+DefaultAssay(seurat) <- "RNA"
+```
+
+
+# B cell markers
+
+```{r}
+FeaturePlot(seurat, features = c("Cd79b","Cd79a","Ms4a1","Cd74"), label = T)
+```
+
+```{r}
+FeaturePlot(seurat, features = c("Plac8", "Vpreb3", "Iglc1"), order = T)
+```
+
+
+
+# NK Cells
+
+```{r}
+FeaturePlot(seurat, features = c("Nkg7","Prf1","Gzma","Gzmm"), label = T)
+```
+
+```{r}
+FeaturePlot(seurat, features = "Xcl1")
+VlnPlot(seurat, features = "Xcl1", split.by = "Sample")
+```
+
+```{r}
+FeaturePlot(seurat, features = c("Klrd1", "Trgc2"))
+```
+
+
+
+# T Cells
+```{r}
+FeaturePlot(seurat, features = c("Cd3d", "Cd8a", "Cd4"), order = T, label = T)
+VlnPlot(seurat, features = c("Cd8a", "Cd4"), split.by = "Sample")
+```
+
+
+Looking for gamma delta Tcells from some markers from Thebaud paper
+```{r}
+FeaturePlot(seurat, features = c("S100a4","Cxcr6"))
+```
+
+```{r}
+FeaturePlot(seurat, features = c("Cd4","Tcf7","Lef1","Dusp10"), order = T, label = T)
+```
+
+Foxp3 and CD25 (IL2ra) are both associated with Tregs
+```{r}
+FeaturePlot(seurat, features = c("Foxp3","Il2ra", "Itgb1", "Icos"), order = T)
+```
+
+```{r}
+FeaturePlot(seurat, features = c("Ctla4", "S100a6"))
+```
+
+
+```{r}
+FeaturePlot(seurat, feature = "Dusp2", order =T)
+```
+
+Cluster 7 - immature T cells?
+```{r}
+FeaturePlot(seurat, features = c("Rag1", "Dntt"), order = T)
+```
+
+
+# Feature Plot of cluster ID genes
+```{r}
+FeaturePlot(seurat, features = c("Nkg7", "Gzma", "Cd3d", "Cd4", "Cd8a",
+                                 "Cxcr6", "Il2ra", "Dntt", "Cd79a", "Cd74"), order=T, ncol = 5)
+```
+
+# Differential gene expression of Lymphoid Cells
+
+```{r}
+cluster_markers <- FindAllMarkers(seurat,
+                                  logfc.threshold = 0.5, #To test all possible genes (very slow), set this to 0
+                                  only.pos = T) #and set this to F
+```
+
+```{r}
+cluster_markers %>%
+  group_by(cluster) %>%
+  top_n(10, avg_log2FC)
+```
+
+```{r}
+top_genes <- cluster_markers %>% 
+  group_by(cluster) %>% 
+  top_n(5, avg_log2FC) %>% 
+  pull(gene)
+```
+
+```{r}
+C5 <- FindMarkers(seurat, ident.1 = "5", ident.2 = "0")
+C6 <- FindMarkers(seurat, ident.1 = "6", ident.2 = "0")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
