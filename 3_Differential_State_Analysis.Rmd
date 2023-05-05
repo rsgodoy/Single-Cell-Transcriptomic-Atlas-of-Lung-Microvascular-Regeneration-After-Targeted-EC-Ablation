@@ -1,0 +1,619 @@
+---
+title: "3_Differential State Analysis"
+output: html_notebook
+---
+
+#Differential State Analysis
+
+#1-Set up 
+```{r}
+setwd("...")
+getwd()
+
+library(Seurat)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(muscat)
+library(SingleCellExperiment)
+```
+
+#2-Loading total lung object 
+```{r}
+setwd("...")
+seurat <- readRDS(file = "mouse_global_high_res.rds")
+
+DimPlot(seurat, label = TRUE) + NoLegend()
+```
+
+```{r}
+DefaultAssay(seurat) <- "RNA"
+```
+
+
+#3-Data Preparation
+
+```{r}
+seurat.sce <- as.SingleCellExperiment(seurat)
+
+seurat.sce <- prepSCE(seurat.sce, 
+                      kid = "CellType", #subpopulation assign
+                      gid = "Sample", #treatment groups
+                      sid = "Annotation", #biological reps
+                      drop=T) #Drops all other colData columns
+
+#Storing cluster and sample IDs + number of cluster and samples into simple variables for easy access
+nk <- length(kids <- levels(seurat.sce$cluster_id))
+ns <- length(sids <- levels(seurat.sce$sample_id))
+names(kids) <- kids
+names(sids) <- sids
+```
+
+#4-Data Overview
+
+## Cluster Sample sizes
+
+```{r}
+# nb. of cells per cluster-sample
+t(table(seurat.sce$cluster_id, seurat.sce$sample_id))
+```
+
+#5-Pseudo-bulk analysis
+
+## Data Aggregation
+```{r}
+pb <- aggregateData(seurat.sce,
+                    assay = "counts", fun = "sum",
+                    by = c("cluster_id", "sample_id"))
+# one sheet per subpopulation
+assayNames(pb)
+# pseudobulks for 1st subpopulation
+t(head(assay(pb)))
+```
+
+Pseudo-bulk level MDS plot
+```{r}
+pb_mds <- pbMDS(pb)
+pb_mds
+```
+
+```{r}
+ei <- metadata(seurat.sce)$experiment_info
+mm <- model.matrix(~0 + ei$group_id)
+dimnames(mm) <- list(ei$sample_id, levels(ei$group_id))
+contrast <- limma::makeContrasts("DPT_3d-Ctrl","DPT_5d-Ctrl","DTP_7d-Ctrl", levels=mm) # need to switch to the appropriate contrast Ctrl vs Treat_8wk or whatever
+```
+
+#6-Differential State Analysis
+
+```{r}
+res <- pbDS(pb, verbose = F, design = mm, contrast = contrast, min_cells = 1) #can add min.cells = 1, to include more groups in this analysis
+```
+
+#7-Filter and format results
+
+```{r}
+tbl_1 <- res$table[[1]] #generates a table of the results for the first contrast
+tbl_2 <- res$table[[2]]
+tbl_3 <- res$table[[3]]
+tbl_4 <- res$table[[4]]
+# one data.frame per cluster
+names(tbl)
+```
+
+```{r}
+# filter FDR < 5%, abs(logFC) > 1 & sort by adj. p-value
+tbl_fil <- lapply(tbl, function(u) {
+  u <- dplyr::filter(u, p_adj.loc < 0.05)
+  dplyr::arrange(u, p_adj.loc)
+})
+
+# nb. of DS genes & % of total by cluster
+n_de <- vapply(tbl_fil, nrow, numeric(1))
+p_de <- format(n_de / nrow(seurat.sce) * 100, digits = 3)
+data.frame("#DS" = n_de, "%DS" = p_de, check.names = FALSE)
+
+# view top 2 hits in each cluster
+top2 <- bind_rows(lapply(tbl_fil, top_n, 2, p_adj.loc))
+format(top2[, -ncol(top2)], digits = 2)
+```
+
+```{r}
+tmp <- seurat.sce
+counts(tmp) <- as.matrix(counts(tmp))
+result_table <- resDS(tmp, res, bind = "row", frq = FALSE, cpm = FALSE)
+rm(tmp)
+```
+
+```{r}
+count_mat <- as.matrix(seurat[["RNA"]]@data) > 0
+
+cluster_list <- unique(result_table$cluster_id)
+
+result_table$Ctrl.frq <- 0
+result_table$DPT_3d.frq <- 0
+result_table$DPT_5d.frq <- 0
+result_table$DTP_7d.frq <- 0
+
+
+Ctrl_cells <- colnames(seurat)[seurat$Sample == "Ctrl"]
+for(i in 1:length(cluster_list)){
+  #Which cells to calc freq on
+  cluster_cells <- colnames(seurat)[seurat$CellType == cluster_list[i]]
+  test_cells <- intersect(Ctrl_cells, cluster_cells)
+  #Which rows of result_table to fill
+  row_ind <- which(result_table$cluster_id == cluster_list[i])
+  frq <- rowSums(count_mat[result_table$gene[row_ind],test_cells]) / length(test_cells)
+  result_table$Ctrl.frq[row_ind] <- frq
+}
+
+DPT_3d_cells <- colnames(seurat)[seurat$Sample == "DPT_3d"]
+for(i in 1:length(cluster_list)){
+  #Which cells to calc freq on
+  cluster_cells <- colnames(seurat)[seurat$CellType == cluster_list[i]]
+  test_cells <- intersect(DPT_3d_cells, cluster_cells)
+  #Which rows of result_table to fill
+  row_ind <- which(result_table$cluster_id == cluster_list[i])
+  frq <- rowSums(count_mat[result_table$gene[row_ind],test_cells]) / length(test_cells)
+  result_table$DPT_3d.frq[row_ind] <- frq
+}
+
+DPT_5d_cells <- colnames(seurat)[seurat$Sample == "DPT_5d"]
+for(i in 1:length(cluster_list)){
+  #Which cells to calc freq on
+  cluster_cells <- colnames(seurat)[seurat$CellType == cluster_list[i]]
+  test_cells <- intersect(DPT_5d_cells, cluster_cells)
+  #Which rows of result_table to fill
+  row_ind <- which(result_table$cluster_id == cluster_list[i])
+  frq <- rowSums(count_mat[result_table$gene[row_ind],test_cells]) / length(test_cells)
+  result_table$DPT_5d.frq[row_ind] <- frq
+}
+
+DTP_7d_cells <- colnames(seurat)[seurat$Sample == "DTP_7d"]
+for(i in 1:length(cluster_list)){
+  #Which cells to calc freq on
+  cluster_cells <- colnames(seurat)[seurat$CellType == cluster_list[i]]
+  test_cells <- intersect(DTP_7d_cells, cluster_cells)
+  #Which rows of result_table to fill
+  row_ind <- which(result_table$cluster_id == cluster_list[i])
+  frq <- rowSums(count_mat[result_table$gene[row_ind],test_cells]) / length(test_cells)
+  result_table$DTP_7d.frq[row_ind] <- frq
+}
+```
+
+## Save results table with the total EC DSA
+```{r}
+setwd("...")
+write.csv(result_table, file = "mouse_dsa_results_global_high_res_min1cell.csv", row.names = F)
+```
+
+```{r}
+filt_result_table <- result_table %>%
+  filter(p_adj.loc <= 0.05) %>%
+  filter(Ctrl.frq >= 0.05 | DPT_3d.frq >= 0.05 | DPT_5d.frq >= 0.05 | DTP_7d.frq >= 0.05)
+```
+
+```{r}
+setwd("...")
+write.csv(filt_result_table, file = "mouse_dsa_results_global_high_res_filtered_min1cell.csv", row.names = F)
+```
+
+#8-Visualization of DSA
+
+```{r}
+pbHeatmap(seurat.sce, res, top_n = 5)
+```
+
+```{r}
+pbHeatmap(seurat.sce, res, k = "gCap-Trans.")
+```
+
+#9-GSEA - did not run this
+
+```{r}
+setwd("...")
+result_table <- read.csv(file = "dsa_results_endothelial_all.csv")
+```
+
+```{r}
+setwd("...")
+hallmarks <- fgsea::gmtPathways("../data/hallmark.genesets.v6.1.symbols.gmt") #50 gene sets
+kegg <- fgsea::gmtPathways("../data/kegg.genesets.v6.1.symbols.gmt") #186
+go <- fgsea::gmtPathways("../data/GOTerms.BP.v6.1.symbols.gmt") #4436
+reactome <- fgsea::gmtPathways("../data/reactome.genesets.v6.1.symbols.gmt") #674
+
+gene_sets <- c(hallmarks, kegg, go, reactome)
+```
+
+```{r}
+result_table1 <- result_table %>% filter(contrast == "Treat_1wk-Ctrl")
+result_table3 <- result_table %>% filter(contrast == "Treat_3wk-Ctrl")
+result_table5 <- result_table %>% filter(contrast == "Treat_5wk-Ctrl")
+result_table8 <- result_table %>% filter(contrast == "Treat_8wk-Ctrl")
+```
+
+## 1wk vs Ctrl
+
+```{r}
+runGSEA <- function(cluster){
+  results <- filter(result_table1, cluster_id == cluster)
+  results <- filter(results, Ctrl.frq >= 0.05 |
+                      Treat_1wk.frq >= 0.05)
+  results <- arrange(results, desc(logFC))
+  
+  cluster_genes <- results$logFC
+  names(cluster_genes) <- toupper(results$gene)
+  
+  gsea <- fgsea(pathways = gene_sets,
+                stats = cluster_genes,
+                minSize=15,
+                maxSize=500,
+                nproc = 2)
+  gsea$cluster <- cluster
+  
+  return(gsea)
+}
+```
+
+```{r}
+cluster_list <- unique(result_table1$cluster_id)
+fgsea_results <- lapply(cluster_list, runGSEA)
+```
+
+Format results
+```{r}
+fgsea_results <- do.call("rbind", fgsea_results)
+fgsea_results <- as.data.frame(fgsea_results)
+fgsea_results$leadingEdge <- as.character(fgsea_results$leadingEdge)
+```
+
+
+```{r}
+writexl::write_xlsx(fgsea_results, path = "...")
+```
+
+Filter results for significant pathways
+```{r}
+gsea_sig <- filter(fgsea_results, padj <= 0.05) %>% arrange(NES)
+```
+
+```{r}
+setwd("...")
+write.csv(gsea_sig, file = "dsa_gsea_endothelial_1wk-Ctrl_results.csv")
+```
+
+```{r}
+gsea_sig1wk <- gsea_sig
+```
+
+```{r}
+ggplot(gsea_sig1wk, aes(reorder(pathway, NES), NES)) +
+  geom_col(aes(fill=cluster)) +
+  coord_flip() +
+  labs(x="Pathway", y = "NES") +
+  theme_minimal()
+```
+
+## 3wk vs Ctrl
+
+```{r}
+runGSEA <- function(cluster){
+  results <- filter(result_table3, cluster_id == cluster)
+  results <- filter(results, Ctrl.frq >= 0.05 |
+                      Treat_3wk.frq >= 0.05)
+  results <- arrange(results, desc(logFC))
+  
+  cluster_genes <- results$logFC
+  names(cluster_genes) <- toupper(results$gene)
+  
+  gsea <- fgsea(pathways = gene_sets,
+                stats = cluster_genes,
+                minSize=15,
+                maxSize=500,
+                nproc = 2)
+  gsea$cluster <- cluster
+  
+  return(gsea)
+}
+```
+
+```{r}
+cluster_list <- unique(result_table3$cluster_id)
+fgsea_results <- lapply(cluster_list, runGSEA)
+```
+
+Format results
+```{r}
+fgsea_results <- do.call("rbind", fgsea_results)
+fgsea_results <- as.data.frame(fgsea_results)
+fgsea_results$leadingEdge <- as.character(fgsea_results$leadingEdge)
+```
+
+Filter results for significant pathways
+```{r}
+gsea_sig <- filter(fgsea_results, padj <= 0.05) %>% arrange(NES)
+```
+
+```{r}
+setwd("...")
+write.csv(gsea_sig, file = "dsa_gsea_endothelial_3wk-Ctrl_results.csv")
+```
+
+```{r}
+gsea_sig3wk <- gsea_sig
+```
+
+## 5wk vs Ctrl
+
+```{r}
+runGSEA <- function(cluster){
+  results <- filter(result_table5, cluster_id == cluster)
+  results <- filter(results, Ctrl.frq >= 0.05 |
+                      Treat_5wk.frq >= 0.05)
+  results <- arrange(results, desc(logFC))
+  
+  cluster_genes <- results$logFC
+  names(cluster_genes) <- toupper(results$gene)
+  
+  gsea <- fgsea(pathways = gene_sets,
+                stats = cluster_genes,
+                minSize=15,
+                maxSize=500,
+                nproc = 2)
+  gsea$cluster <- cluster
+  
+  return(gsea)
+}
+```
+
+```{r}
+cluster_list <- unique(result_table5$cluster_id)
+fgsea_results <- lapply(cluster_list, runGSEA)
+```
+
+Format results
+```{r}
+fgsea_results <- do.call("rbind", fgsea_results)
+fgsea_results <- as.data.frame(fgsea_results)
+fgsea_results$leadingEdge <- as.character(fgsea_results$leadingEdge)
+```
+
+Filter results for significant pathways
+```{r}
+gsea_sig <- filter(fgsea_results, padj <= 0.05) %>% arrange(NES)
+```
+
+```{r}
+setwd("...")
+write.csv(gsea_sig, file = "dsa_gsea_endothelial_5wk-Ctrl_results.csv")
+```
+
+```{r}
+gsea_sig5wk <- gsea_sig
+```
+
+## 8wk vs Ctrl
+
+```{r}
+runGSEA <- function(cluster){
+  results <- filter(result_table8, cluster_id == cluster)
+  results <- filter(results, Ctrl.frq >= 0.05 |
+                      Treat_8wk.frq >= 0.05)
+  results <- arrange(results, desc(logFC))
+  
+  cluster_genes <- results$logFC
+  names(cluster_genes) <- toupper(results$gene)
+  
+  gsea <- fgsea(pathways = gene_sets,
+                stats = cluster_genes,
+                minSize=15,
+                maxSize=500,
+                nproc = 2)
+  gsea$cluster <- cluster
+  
+  return(gsea)
+}
+```
+
+```{r}
+cluster_list <- unique(result_table8$cluster_id)
+fgsea_results <- lapply(cluster_list, runGSEA)
+```
+
+Format results
+```{r}
+fgsea_results <- do.call("rbind", fgsea_results)
+fgsea_results <- as.data.frame(fgsea_results)
+fgsea_results$leadingEdge <- as.character(fgsea_results$leadingEdge)
+```
+
+Filter results for significant pathways
+```{r}
+gsea_sig <- filter(fgsea_results, padj <= 0.05) %>% arrange(NES)
+```
+
+```{r}
+setwd("...")
+write.csv(gsea_sig, file = "dsa_gsea_endothelial_8wk-Ctrl_results.csv")
+```
+
+```{r}
+gsea_sig8wk <- gsea_sig
+```
+
+#10-Visualize w Enrichment Plot
+
+```{r}
+BiocManager::install("enrichplot")
+library(enrichplot)
+```
+
+## Load 1week comparison
+```{r}
+setwd("...")
+gsea_sig1wk <- read.csv(file = "dsa_gsea_endothelial_1wk-Ctrl_results.csv")
+```
+
+```{r}
+gsea_sig1wk <- mutate(gsea_sig1wk, log10_padj = -log10(padj))
+```
+
+```{r}
+C0_1wk <- gsea_sig1wk %>% arrange(gsea_sig1wk, desc(NES)) %>% filter(cluster == "0")
+top_10 <- top_n(C0_1wk, n=10, NES)
+bot_10 <- top_n(C0_1wk, n=-10, NES)
+C0_1wk <- full_join(top_10, bot_10)
+```
+
+```{r}
+C_1wk <- gsea_sig1wk %>% arrange(gsea_sig1wk, desc(NES)) %>% filter(cluster == "1")
+top_10 <- top_n(C_1wk, n=10, NES)
+bot_10 <- top_n(C_1wk, n=-10, NES)
+C1_1wk <- full_join(top_10, bot_10)
+```
+
+```{r}
+C_1wk <- gsea_sig1wk %>% arrange(gsea_sig1wk, desc(NES)) %>% filter(cluster == "3")
+top_10 <- top_n(C_1wk, n=10, NES)
+bot_10 <- top_n(C_1wk, n=-10, NES)
+C3_1wk <- full_join(top_10, bot_10)
+```
+
+```{r}
+C_1wk <- gsea_sig1wk %>% arrange(gsea_sig1wk, desc(NES)) %>% filter(cluster == "4")
+top_10 <- top_n(C_1wk, n=10, NES)
+bot_10 <- top_n(C_1wk, n=-10, NES)
+C4_1wk <- full_join(top_10, bot_10)
+```
+
+```{r}
+C_1wk <- gsea_sig1wk %>% arrange(gsea_sig1wk, desc(NES)) %>% filter(cluster == "6")
+top_10 <- top_n(C_1wk, n=10, NES)
+bot_10 <- top_n(C_1wk, n=-10, NES)
+C6_1wk <- full_join(top_10, bot_10)
+```
+
+```{r}
+p1 <- ggplot(C0_1wk, aes(reorder(pathway, NES), NES)) +
+  geom_col(aes(fill=log10_padj)) +
+  coord_flip() +
+  labs(x="Pathway", y = "NES") +
+  theme_minimal()
+p2 <- ggplot(C1_1wk, aes(reorder(pathway, NES), NES)) +
+  geom_col(aes(fill=log10_padj)) +
+  coord_flip() +
+  labs(x="Pathway", y = "NES") +
+  theme_minimal()
+p3 <- ggplot(C3_1wk, aes(reorder(pathway, NES), NES)) +
+  geom_col(aes(fill=log10_padj)) +
+  coord_flip() +
+  labs(x="Pathway", y = "NES") +
+  theme_minimal()
+p4 <- ggplot(C4_1wk, aes(reorder(pathway, NES), NES)) +
+  geom_col(aes(fill=log10_padj)) +
+  coord_flip() +
+  labs(x="Pathway", y = "NES") +
+  theme_minimal()
+p5 <- ggplot(C6_1wk, aes(reorder(pathway, NES), NES)) +
+  geom_col(aes(fill=log10_padj)) +
+  coord_flip() +
+  labs(x="Pathway", y = "NES") +
+  theme_minimal()
+```
+
+View Plots
+```{r}
+p1
+p2
+p3
+p4
+p5
+```
+
+Save Plots
+```{r}
+setwd("...")
+ggsave(p1, filename = "Cluster0_1wk_pathways.png", width=12, height= 7, dpi=300)
+ggsave(p2, filename = "Cluster1_1wk_pathways.png", width=12, height= 7, dpi=300)
+ggsave(p3, filename = "Cluster3_1wk_pathways.png", width=12, height= 7, dpi=300)
+ggsave(p4, filename = "Cluster4_1wk_pathways.png", width=12, height= 7, dpi=300)
+ggsave(p5, filename = "Cluster6_1wk_pathways.png", width=12, height= 7, dpi=300)
+```
+
+
+## Load 5week comparisons
+```{r}
+setwd("...")
+gsea_sig5wk <- read.csv(file = "dsa_gsea_endothelial_5wk-Ctrl_results.csv")
+```
+
+```{r}
+gsea_sig5wk <- mutate(gsea_sig5wk, log10_padj = -log10(padj))
+```
+
+```{r}
+C <- gsea_sig5wk %>% arrange(gsea_sig5wk, desc(NES)) %>% filter(cluster == "0")
+top_10 <- top_n(C, n=10, NES)
+bot_10 <- top_n(C, n=-10, NES)
+C0_5wk <- full_join(top_10, bot_10)
+```
+
+```{r}
+C <- gsea_sig5wk %>% arrange(gsea_sig5wk, desc(NES)) %>% filter(cluster == "1")
+top_10 <- top_n(C, n=10, NES)
+bot_10 <- top_n(C, n=-10, NES)
+C1_5wk <- full_join(top_10, bot_10)
+```
+
+```{r}
+C <- gsea_sig5wk %>% arrange(gsea_sig5wk, desc(NES)) %>% filter(cluster == "3")
+top_10 <- top_n(C, n=10, NES)
+bot_10 <- top_n(C, n=-10, NES)
+C3_5wk <- full_join(top_10, bot_10)
+```
+
+```{r}
+C <- gsea_sig5wk %>% arrange(gsea_sig5wk, desc(NES)) %>% filter(cluster == "4")
+top_10 <- top_n(C, n=10, NES)
+bot_10 <- top_n(C, n=-10, NES)
+C4_5wk <- full_join(top_10, bot_10)
+```
+
+```{r}
+p1 <- ggplot(C0_5wk, aes(reorder(pathway, NES), NES)) +
+  geom_col(aes(fill=log10_padj)) +
+  coord_flip() +
+  labs(x="Pathway", y = "NES") +
+  theme_minimal()
+p2 <- ggplot(C1_5wk, aes(reorder(pathway, NES), NES)) +
+  geom_col(aes(fill=log10_padj)) +
+  coord_flip() +
+  labs(x="Pathway", y = "NES") +
+  theme_minimal()
+p3 <- ggplot(C3_5wk, aes(reorder(pathway, NES), NES)) +
+  geom_col(aes(fill=log10_padj)) +
+  coord_flip() +
+  labs(x="Pathway", y = "NES") +
+  theme_minimal()
+p4 <- ggplot(C4_5wk, aes(reorder(pathway, NES), NES)) +
+  geom_col(aes(fill=log10_padj)) +
+  coord_flip() +
+  labs(x="Pathway", y = "NES") +
+  theme_minimal()
+```
+
+View Plots
+```{r}
+p1
+p2
+p3
+p4
+```
+
+Save Plots
+```{r}
+setwd("...")
+ggsave(p2, filename = "Cluster1_5wk_pathways.png", width=12, height= 7, dpi=300)
+ggsave(p3, filename = "Cluster3_5wk_pathways.png", width=12, height= 7, dpi=300)
+ggsave(p4, filename = "Cluster4_5wk_pathways.png", width=12, height= 7, dpi=300)
+```
