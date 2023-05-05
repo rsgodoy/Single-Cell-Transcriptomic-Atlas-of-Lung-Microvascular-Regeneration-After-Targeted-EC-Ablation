@@ -1,0 +1,247 @@
+---
+title: "4_decoupleR-for mouseDT cluster_1"
+author: "LW"
+date: "24/10/2022"
+output: html_document
+---
+
+```{r install once, eval=FALSE, include=FALSE}
+#install.packages("BiocManager")
+BiocManager::install("decoupleR", force = TRUE)
+```
+
+```{r}
+#install.packages('SeuratObject')
+```
+
+```{r required packages, message=FALSE, warning=FALSE}
+library(Seurat)
+library(decoupleR)
+```
+
+```{r packages needed for data handling and plotting, message=FALSE, warning=FALSE}
+library(dplyr)
+library(tibble)
+library(tidyr)
+library(patchwork)
+library(ggplot2)
+library(pheatmap)
+```
+
+# subset mouseDT data to cluster_1
+```{r load rds}
+input_dir <- "..."
+mdata <- readRDS(file.path(input_dir, "1on1 tutorial", "EC_seurat_integrated.rds"))
+```
+
+```{r subset rds}
+Cluster1 <- subset(mdata, idents = "1")
+DimPlot(Cluster1)
+
+Cluster1$Zone <- Cluster1$Sample
+Cluster1$Zone[Cluster1$Zone == "Ctrl"] <- "1"
+Cluster1$Zone[Cluster1$Zone == "DPT_3d"] <- "2"
+Cluster1$Zone[Cluster1$Zone == "DPT_5d"] <- "3"
+Cluster1$Zone[Cluster1$Zone == "DPT_7d"] <- "4"
+
+Idents(Cluster1) <- "Zone"
+
+DefaultAssay(Cluster1) <- "RNA" # should always look at the RNA assay for DE testing
+DimPlot(Cluster1)
+```
+
+##Check umap first
+```{r}
+DimPlot(Cluster1, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend()
+```
+
+# curated TFs-targets collection
+##DoRothEA network
+
+```{r install once, eval=FALSE, include=FALSE}
+if (!requireNamespace('BiocManager', quietly = TRUE))
+    install.packages('BiocManager')
+
+## Last release in Bioconductor
+BiocManager::install('OmnipathR', version = '3.14')
+## Development version with the lastest updates BiocManager::install('OmnipathR', version = 'devel')
+```
+
+###PBMC data and human network resource
+```{r retrieve net from OmniPath}
+mnet <- get_dorothea(organism = 'mouse', levels = c('A','B','C'))
+mnet #[2022-10-25 10:54:29] [SUCCESS] [OmnipathR] Downloaded 256977 interactions.
+```
+
+###Activity inference with Weighted Mean
+
+```{r extract the normalized log-transformed counts}
+mmat <- as.matrix(Cluster1@assays$RNA@data)
+```
+
+```{r Weighted Mean wmean}
+macts <- run_wmean(mat=mmat, net=mnet, .source='source', .target='target', 
+                  .mor='mor', seed = 42, times = 100, minsize = 5)
+macts # is a tibble file
+```
+####Save as cvs or tsv
+```{r Exp output file}
+library("readr")
+write_tsv(macts, file = "...") # 1.4 of uncompressed
+# By default, write.csv() includes a column with row names (in our case the names are just the row numbers), so we need to add row.names = FALSE so they are not included write.csv(surveys_complete, file = "data_output/surveys_complete.csv", row.names = FALSE)
+```
+
+###Visualization
+```{r extract norm_wmean and store it in a new column named 'tfswmean'}
+Cluster1[['tfswmean']] <- macts %>% 
+  filter(statistic == 'norm_wmean') %>% 
+  pivot_wider(id_cols = 'source', names_from = 'condition', values_from = 'score') %>% 
+  column_to_rownames('source') %>% 
+  Seurat::CreateAssayObject(.)
+```
+
+```{r change assay}
+DefaultAssay(object = Cluster1) <- 'tfswmean'
+```
+
+```{r scale the data}
+Cluster1 <- ScaleData(Cluster1)
+Cluster1@assays$tfswmean@data <- Cluster1@assays$tfswmean@scale.data
+```
+
+```{r save RDS}
+saveRDS(Cluster1, "...")
+```
+
+
+```{r plot with new assay called tfswmean}
+pdf("...", width = 12, height = 4.5)
+
+p1m <- DimPlot(Cluster1, reduction = "umap", label = TRUE, pt.size = 0.5) +
+  NoLegend() + ggtitle('Cell types')
+
+p2m <- (FeaturePlot(Cluster1, features = c("Foxm1")) & 
+        scale_color_gradient2(low='blue', mid='white', high='red')) +
+  ggtitle('Foxm1 activity')
+
+DefaultAssay(object = Cluster1) <- 'RNA'
+p3m <- FeaturePlot(Cluster1, features = c("Foxm1")) + ggtitle('Foxm1 expression')
+DefaultAssay(object = Cluster1) <- 'tfswmean'
+p1m | p2m | p3m
+dev.off()
+p1m | p2m | p3m
+```
+
+###Visualization-exploration
+###Heatmap
+```{r prep to see what is the mean activity per group of the top 20 more variable TFs}
+n_tfs <- 25
+```
+
+```{r Extract activities from object as a long dataframe}
+dfm <- t(as.matrix(Cluster1@assays$tfswmean@data)) %>% 
+  as.data.frame() %>% 
+  mutate(zone = Idents(Cluster1)) %>% 
+  pivot_longer(cols = -zone, names_to = "source", values_to = "score") %>% 
+  group_by(zone, source) %>% 
+  summarise(mean=mean(score))
+```
+
+```{r Get top TFs with more variable means across clusters}
+# Get top tfs with more variable means across clusters
+tfs_m <- dfm %>%
+  group_by(source) %>%
+  summarise(std = sd(mean)) %>%
+  arrange(-abs(std)) %>%
+  head(n_tfs) %>%
+  pull(source)
+```
+
+```{r subset and transform based on top TFs}
+# Subset long data frame to top tfs and transform to wide matrix
+top_acts_mmat <- dfm %>%
+  filter(source %in% tfs_m) %>%
+  pivot_wider(id_cols = 'zone', names_from = 'source',
+              values_from = 'mean') %>%
+  column_to_rownames('zone') %>%
+  as.matrix()
+```
+
+```{r Choose color palette}
+# Choose color palette
+palette_length = 100
+my_color = colorRampPalette(c("Darkblue", "white","red"))(palette_length)
+
+my_breaks <- c(seq(-2, 0, length.out=ceiling(palette_length/2) + 1),
+               seq(0.05, 2, length.out=floor(palette_length/2)))
+```
+
+```{r plot with chosen color palette}
+# Plot
+hmap <- pheatmap(top_acts_mmat, border_color = NA, color=my_color, breaks = my_breaks) 
+hmap
+```
+```{r}
+getwd()
+```
+
+
+```{r}
+# Save the plot or the object of the plot
+ggsave(hmap, filename = '...', dpi = 300, width = 12, height = 8) # font seemed small, so I reduced width and height by half.
+```
+
+```{r}
+# Save the plot or the object of the plot
+ggsave(hmap, filename = '...', dpi = 300, width = 6, height = 4)
+```
+
+```{r}
+h2 <- pheatmap(top_acts_mmat, border_color = NA)
+h2
+ggsave(h2, filename = '...', dpi = 300, width = 6, height = 4)
+```
+
+```{r}
+getwd()
+```
+
+
+```{r reload_n_plot}
+library(Seurat)
+library(SeuratObject)
+library(ggplot2)
+```
+
+```{r reload analysis files}
+# for adjust scale bar range
+# getwd()
+mdata <- readRDS("...")
+```
+
+```{r}
+DefaultAssay(object = mdata) <- 'tfswmean'
+p2m <- (FeaturePlot(mdata, features = c("Foxm1")) & 
+        scale_color_gradient2(low='blue', mid='white', high='red')) +
+  ggtitle('Foxm1 activity')
+p2m
+```
+
+```{r}
+DefaultAssay(object = mdata) <- 'tfswmean'
+p2 <- (FeaturePlot(mdata, features = c("Foxm1")) & 
+        scale_color_gradient2(low = "blue", mid = "white", high = "red", 
+                                midpoint = 0, limits = c(-2, 2), oob = scales::squish)) +
+  ggtitle('Foxm1 activity') #muted("blue"), muted("red")
+p2
+```
+
+```{r plot TF among upregulated TFs/Regulons}
+DefaultAssay(object = mdata) <- 'tfswmean'
+p2up <- (FeaturePlot(mdata, features = c("Foxm1")) & 
+        scale_color_gradient2(low = "grey", mid = "white", high = "red", 
+                                midpoint = 1, limits = c(0, 2), oob = scales::squish)) +
+  ggtitle('Foxm1 activity among upregulated TFs/Regulons') #muted("blue"), muted("red")
+p2up
+```
+
