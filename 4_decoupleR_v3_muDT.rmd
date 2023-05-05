@@ -1,8 +1,5 @@
 ---
 title: "4_decoupleR-for mouseDT cluster_1"
-author: "LW"
-date: "24/10/2022"
-output: html_document
 ---
 
 ```{r install once, eval=FALSE, include=FALSE}
