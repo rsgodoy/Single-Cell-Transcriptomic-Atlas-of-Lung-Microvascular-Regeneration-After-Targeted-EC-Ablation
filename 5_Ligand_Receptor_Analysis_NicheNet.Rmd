@@ -1,0 +1,1739 @@
+---
+title: "5_Ligand_Receptor_Analysis_NicheNet"
+---
+
+_____________________
+_____________________
+# 3 days Analysis
+_____________________
+_____________________
+
+# Setup
+
+```{r}
+library(Seurat)
+library(nichenetr)
+library(pheatmap)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(RColorBrewer)
+library(circlize)
+```
+
+# Load the data
+```{r}
+setwd("...")
+result_table <- read.csv(file = "mouse_dsa_results_global_high_res_min1cell.csv")
+```
+
+```{r}
+setwd("...")
+seurat <- readRDS(file = "mouse_global_high_res.rds")
+```
+
+# Prepare NicheNet Prior Model
+
+```{r}
+ligand_target_matrix <- readRDS(url("https://zenodo.org/record/3260758/files/ligand_target_matrix.rds"))
+ligand_target_matrix[1:5,1:5] # target genes in rows, ligands in columns
+```
+
+```{r}
+ligand_target_matrix <- readRDS(file ="...")
+ligand_target_matrix[1:5,1:5] # target genes in rows, ligands in columns
+```
+
+```{r}
+lr_network <- readRDS(url("https://zenodo.org/record/3260758/files/lr_network.rds"))
+head(lr_network)
+```
+
+```{r}
+weighted_networks <- readRDS(url("https://zenodo.org/record/3260758/files/weighted_networks.rds"))
+weighted_networks_lr = weighted_networks$lr_sig %>% inner_join(lr_network %>% distinct(from,to), by = c("from","to"))
+```
+
+```{r}
+weighted_networks <- readRDS(file = "...")
+weighted_networks_lr = weighted_networks$lr_sig %>% inner_join(lr_network %>% distinct(from,to), by = c("from","to"))
+```
+
+```{r}
+lr_network = lr_network %>% mutate(from = convert_human_to_mouse_symbols(from), to = convert_human_to_mouse_symbols(to)) %>% drop_na()
+colnames(ligand_target_matrix) = ligand_target_matrix %>% colnames() %>% convert_human_to_mouse_symbols()
+rownames(ligand_target_matrix ) = ligand_target_matrix %>% rownames() %>% convert_human_to_mouse_symbols()
+
+ligand_target_matrix = ligand_target_matrix %>% .[!is.na(rownames(ligand_target_matrix)), !is.na(colnames(ligand_target_matrix))]
+
+weighted_networks_lr = weighted_networks_lr %>% mutate(from = convert_human_to_mouse_symbols(from), to = convert_human_to_mouse_symbols(to)) %>% drop_na()
+```
+
+# Run NicheNet
+
+```{r}
+clusters <- result_table %>%
+  filter(contrast == "DPT_3d-Ctrl") %>%
+  filter(p_adj.loc <= 0.05 &
+           abs(logFC) >= 0.5) %>%
+  filter(Ctrl.frq >= 0.05 | DPT_3d.frq >= 0.05 | DPT_5d.frq >= 0.05 | DTP_7d.frq >= 0.05) %>%
+  select(cluster_id) %>%
+  group_by(cluster_id) %>%
+  summarise(nGene = n())
+clusters
+```
+
+```{r}
+receiver_clusters <- filter(clusters, nGene >= 50) %>%
+  pull(cluster_id)
+receiver_clusters
+```
+
+```{r}
+getFrequency <- function(cluster){
+  cluster_cells <- colnames(seurat)[Idents(seurat) == cluster]
+  
+  subset_mat <- as.matrix(seurat[["RNA"]]@data[, cluster_cells])
+  subset_frq <- rowSums(subset_mat > 0) / ncol(subset_mat)
+  genes_keep <- rownames(subset_mat)[subset_frq >= 0.1]
+  return(genes_keep)
+}
+```
+
+```{r}
+runNicheNet <- function(receiver){
+  print(paste0("Performing analysis on cluster: ", receiver))
+  #define receiver
+  expressed_genes_receiver <- getFrequency(receiver)
+  background_expressed_genes <- expressed_genes_receiver %>% .[. %in% rownames(ligand_target_matrix)]
+  
+  #define senders
+  sender_celltypes <- clusters$cluster_id[which(clusters$cluster_id %in% result_table$cluster_id)]
+  sender_celltypes <- sender_celltypes[-1] #removes doublets
+  list_expressed_genes_sender <- sender_celltypes %>% unique() %>% lapply(getFrequency) 
+  expressed_genes_sender <- list_expressed_genes_sender %>% unlist() %>% unique()
+  
+  #get PAH genes of interest
+  geneset_oi <- filter(result_table, p_adj.loc <= 0.05 & 
+                       abs(logFC) >= 0.5 &
+                       cluster_id == receiver)
+  geneset_oi <- filter(geneset_oi, Ctrl.frq >= 0.05 | DPT_3d.frq >= 0.05 | DPT_5d.frq >= 0.05 | DTP_7d.frq >= 0.05) %>% pull(gene)
+  
+  #define potential ligands for genes
+  ligands <- lr_network %>% pull(from) %>% unique()
+  receptors <- lr_network %>% pull(to) %>% unique()
+  expressed_ligands <- intersect(ligands,expressed_genes_sender)
+  expressed_receptors <- intersect(receptors,expressed_genes_receiver)
+  potential_ligands <- lr_network %>% 
+    filter(from %in% expressed_ligands & to %in% expressed_receptors) %>% 
+    pull(from) %>% 
+    unique()
+  
+  #perform nichenet ligand activity analysis: rank potential ligands based on the presence
+  #of their target genes in the gene set of interest (compared to the background set of genes)
+  ligand_activities <- predict_ligand_activities(geneset = geneset_oi,  background_expressed_genes = background_expressed_genes, ligand_target_matrix = ligand_target_matrix, potential_ligands = potential_ligands)
+  ligand_activities <- ligand_activities %>% arrange(-pearson) %>% mutate(rank = rank(dplyr::desc(pearson)))
+  ligand_activities$receiver_cluster <- receiver
+  
+  return(ligand_activities)
+}
+```
+
+```{r}
+Sys.time()
+ligand_activities <- lapply(receiver_clusters, runNicheNet) 
+Sys.time()
+```
+
+```{r}
+ligand_activities <- do.call("rbind", ligand_activities)
+```
+
+```{r}
+pearson_scores <- ggplot(ligand_activities, aes(x=receiver_cluster, y=pearson)) + 
+  geom_jitter(size=0.25) + 
+  theme_bw() + 
+  theme(axis.text.x=element_text(angle=45, hjust=1))
+pearson_scores
+```
+
+# Save Point
+
+```{r}
+setwd("...")
+saveRDS(ligand_activities, file = "ligand_activities_global_3days.rds")
+```
+
+```{r}
+setwd("...")
+write.csv(ligand_activities, file = "ligand_activities_global_3days.csv")
+```
+
+#Load Data
+```{r}
+setwd("...")
+ligand_activities <- readRDS(file = "ligand_activities_global_3days.rds")
+```
+
+
+```{r}
+subset_dict <- data.frame(subset = seurat$cluster_high_res,
+                          CellType = seurat$CellType)
+subset_dict <- unique(subset_dict)
+subset_dict <- separate(subset_dict, subset, c("subset", "clusterID"))
+subset_dict$clusterID <- NULL
+subset_dict$subset <- as.character(subset_dict$subset)
+subset_dict$CellType <- as.character(subset_dict$CellType)
+```
+
+# Visualize
+
+```{r}
+best_upstream_lig_ClassMono <- ligand_activities %>% filter(receiver_cluster == "Classical Mono") %>% top_n(20, pearson) %>% arrange(-pearson) %>% pull(test_ligand) %>% unique()
+best_upstream_lig_gCapTrans <- ligand_activities %>% filter(receiver_cluster == "gCap-Trans.") %>% top_n(20, pearson) %>% arrange(-pearson) %>% pull(test_ligand) %>% unique()
+```
+
+```{r}
+DotPlot(seurat, features = best_upstream_lig_ClassMono %>% rev(), cols = "RdYlBu") + RotatedAxis()
+DotPlot(seurat, features = best_upstream_lig_gCapTrans %>% rev(), cols = "RdYlBu") + RotatedAxis()
+```
+
+## Pearson score - heatmap of ligand activities
+
+```{r}
+best_upstream_lig_gCapTrans <- ligand_activities %>% filter(receiver_cluster == "gCap-Trans.") %>% top_n(10, pearson) %>% arrange(-pearson) %>% pull(test_ligand) %>% unique() %>% rev()
+```
+
+```{r}
+ligand_activities_EC <- filter(ligand_activities, receiver_cluster == "gCap-Trans.")
+```
+
+```{r}
+ligand_pearson_matrix <- ligand_activities_EC %>% select(test_ligand, pearson, receiver_cluster) %>% as.data.frame()
+```
+
+```{r}
+ligand_pearson_matrix2 <- filter(ligand_pearson_matrix, test_ligand %in% best_upstream_lig_gCapTrans)
+```
+
+```{r}
+scale_limits <- c(0, 0.18)
+```
+
+```{r}
+p_ligand_pearson <- ggplot(ligand_pearson_matrix2, aes(x=reorder(test_ligand, pearson), receiver_cluster, fill = pearson)) +
+  geom_tile(color = "white", lwd = 1) +
+  scale_fill_gradient(low = "white", high = "darkorange",
+                      limits = scale_limits) +
+  coord_flip() + 
+  theme_classic() +
+  xlab("Prioritized Ligand") +
+  ylab("Receiver Cluster")
+p_ligand_pearson
+```
+
+```{r}
+ggsave(filename = "Day3 Ligand Activity Scores_gCapT.png", plot = p_ligand_pearson, height = 5, width = 2.25, dpi = 300)
+```
+
+## Active target gene inference
+
+```{r}
+geneset_oi <- result_table %>% filter(cluster_id == "gCap-Trans." &
+                                        p_adj.loc <= 0.05 & 
+                                        abs(logFC) >= 0.25 &
+                                        contrast == "DPT_3d-Ctrl") %>% pull(gene)
+geneset_oi = geneset_oi %>% .[. %in% rownames(ligand_target_matrix)]
+```
+
+```{r}
+active_ligand_target_links_df = best_upstream_lig_gCapTrans %>% lapply(get_weighted_ligand_target_links,geneset = geneset_oi, ligand_target_matrix = ligand_target_matrix, n = 200) %>% bind_rows() %>% drop_na()
+
+active_ligand_target_links = prepare_ligand_target_visualization(ligand_target_df = active_ligand_target_links_df, ligand_target_matrix = ligand_target_matrix, cutoff = 0.5)
+
+order_ligands = intersect(best_upstream_lig_gCapTrans, colnames(active_ligand_target_links)) %>% rev() %>% make.names()
+order_targets = active_ligand_target_links_df$target %>% unique() %>% intersect(rownames(active_ligand_target_links)) %>% make.names()
+rownames(active_ligand_target_links) = rownames(active_ligand_target_links) %>% make.names() # make.names() for heatmap visualization of genes like H2-T23
+colnames(active_ligand_target_links) = colnames(active_ligand_target_links) %>% make.names() # make.names() for heatmap visualization of genes like H2-T23
+
+vis_ligand_target = active_ligand_target_links[order_targets,order_ligands] %>% t()
+```
+
+```{r}
+p_ligand_target_network = vis_ligand_target %>% make_heatmap_ggplot("Prioritized ligands","Predicted target genes", color = "purple",legend_position = "top", x_axis_position = "top",legend_title = "Regulatory potential")  + theme(axis.text.x = element_text(face = "italic")) + scale_fill_gradient2(low = "whitesmoke",  high = "purple", breaks = c(0,0.002,0.0045))
+p_ligand_target_network
+```
+
+# Ligand Activity
+
+```{r}
+ligand_auroc_heatmap <- function(subset_name, plot_width, plot_height){
+  
+  subset_clusters <- subset_dict %>% filter(subset == subset_name) %>% pull(CellType)
+  
+  ligands <- ligand_activities %>%
+    filter(receiver_cluster %in% subset_clusters &
+           rank <= 10)
+  
+  ligand_mat <- ligands[,c("test_ligand", "auroc", "receiver_cluster")]
+  ligand_mat <- pivot_wider(ligand_mat, names_from="receiver_cluster", values_from="auroc")
+  ligand_mat <- as.data.frame(ligand_mat)
+  ligand_list <- ligand_mat$test_ligand
+  cell_types <- colnames(ligand_mat)[2:ncol(ligand_mat)]
+  ligand_mat <- as.matrix(ligand_mat[,2:ncol(ligand_mat)])
+  rownames(ligand_mat) <- ligand_list
+  colnames(ligand_mat) <- cell_types
+  ligand_mat[is.na(ligand_mat)] <- 0
+  ligand_mat[ligand_mat > 0] <- 1
+  
+  #Can't do clustered columns if only one cell type
+  if(length(unique(ligands$receiver_cluster)) > 1){
+    ligand_heatmap <- pheatmap(ligand_mat,
+         color = c("whitesmoke", "firebrick"),
+         legend = F,
+         cluster_rows=T,
+         cluster_cols=T,
+         show_rownames=T,
+         show_colnames=T,
+         treeheight_row=0,
+         treeheight_col=0,
+         clustering_method="ward.D2",
+         border_color = "black",
+         filename=paste0(subset_name, "_ligand_activity.png"),
+         width = plot_width,
+         height = plot_height)
+  } else{
+    ligand_heatmap <- pheatmap(ligand_mat,
+         color = c("firebrick", "firebrick"),
+         breaks = c(0,1),
+         legend = F,
+         cluster_rows=F,
+         cluster_cols=F,
+         show_rownames=T,
+         show_colnames=T,
+         treeheight_row=0,
+         treeheight_col=0,
+         clustering_method="ward.D2",
+         border_color = "black",
+         filename=paste0(subset_name, "_ligand_activity.png"),
+         width = plot_width,
+         height = plot_height)
+  }
+  
+  return(ligand_heatmap)
+}
+```
+
+```{r}
+unique(subset_dict$subset)
+```
+
+```{r}
+setwd("...")
+ligand_endothelial <- ligand_auroc_heatmap("Endothelial", 1.3, 5.4)
+ligand_epithelial <- ligand_auroc_heatmap("Epithelial", 1, 4)
+ligand_myeloid <- ligand_auroc_heatmap("Myeloid", 1.2, 5.1)
+ligand_stromal <- ligand_auroc_heatmap("Stromal", 1, 4)
+#ligand_lymphoid <- ligand_auroc_heatmap("Lymphoid", 2, 6)
+
+```
+
+```{r}
+getAvgExp <- function(cluster, gene_order){
+  cells <- colnames(seurat)[seurat$CellType == cluster]
+  avg <- rowMeans(as.matrix(seurat[["RNA"]]@data[gene_order,cells]))
+  return(avg)
+}
+```
+
+```{r}
+ligand_expression_heatmap <- function(ligand_heatmap, subset_name,
+                                      plot_height){
+  
+  #Get ligand list from heatmap
+  gene_order <- ligand_heatmap$gtable$grobs[[3]]$label
+  
+  clusters <- levels(Idents(seurat))
+  ligand_avg <- lapply(clusters, getAvgExp, gene_order=gene_order)
+  ligand_avg <- do.call("cbind", ligand_avg)
+  colnames(ligand_avg) <- clusters
+  
+  ligand_exp_heatmap <- pheatmap(ligand_avg,
+         color = colorRampPalette(c("whitesmoke", "purple"))(100),
+         breaks = seq(0, 2, length.out=101),
+         cluster_rows=F,
+         cluster_cols=F,
+         show_rownames=T,
+         show_colnames=T,
+         treeheight_row=0,
+         treeheight_col=0,
+         clustering_method="ward.D2",
+         border_color = "black",
+         filename=paste0(subset_name, "_ligand_expression.png"),
+         width=7, 
+         height=plot_height)
+  
+}
+```
+
+```{r}
+setwd("~/Documents/PhD - OHRI & University of Ottawa/scRNAseq/Rat Su-Hx Timecourse Merge 1-3_Ensembl_104+Pecam/output/global/")
+ligand_expression_heatmap(ligand_myeloid, "Myeloid", 4)
+ligand_expression_heatmap(ligand_epithelial, "Epithelial", 3)
+ligand_expression_heatmap(ligand_endothelial, "Endothelial", 5.25)
+ligand_expression_heatmap(ligand_stromal, "Stromal", 3)
+```
+
+## Fold change in PAH
+```{r}
+getFoldChange <- function(cluster, gene_order){
+  filtered_table <- filter(result_table, cluster_id == cluster &
+                             p_adj.loc <= 0.05 & 
+                             contrast == "Treat_1wk-Ctrl")
+  
+  fc <- filtered_table$logFC
+  names(fc) <- filtered_table$gene
+  fc <- fc[gene_order]
+  names(fc) <- gene_order
+  fc[is.na(fc)] <- 0
+  
+  return(fc)
+}
+```
+
+```{r}
+ligand_fc_heatmap <- function(ligand_heatmap, subset_name, plot_height){
+  gene_order <- ligand_heatmap$gtable$grobs[[3]]$label
+  clusters <- levels(Idents(seurat))
+  
+  fold_change <- lapply(clusters, getFoldChange, gene_order = gene_order)
+  
+  fold_change <- do.call("cbind", fold_change)
+  colnames(fold_change) <- clusters
+  
+  ligand_fc_heatmap <- pheatmap(fold_change,
+         color = colorRampPalette(rev(brewer.pal(7, "RdBu")))(100),
+         breaks = seq(-2, 2, length.out=101),
+         cluster_rows=F,
+         cluster_cols=F,
+         show_rownames=T,
+         show_colnames=T,
+         treeheight_row=0,
+         treeheight_col=0,
+         clustering_method="ward.D2",
+         border_color = "black",
+         filename=paste0(subset_name, "_ligand_foldchange.png"),
+         width=7, height=plot_height)
+}
+```
+
+```{r}
+setwd("...")
+ligand_fc_heatmap(ligand_stromal, "Stromal", 3)
+ligand_fc_heatmap(ligand_myeloid, "Myeloid", 4)
+ligand_fc_heatmap(ligand_epithelial, "Epithelial", 3)
+ligand_fc_heatmap(ligand_endothelial, "Endothelial", 5.25)
+```
+
+# Receptor Visuliazation
+
+## Receptor-ligand interactions
+
+```{r}
+getFrequency <- function(cluster){
+  cluster_cells <- colnames(seurat)[Idents(seurat) == cluster]
+  receptors <- lr_network %>% pull(to) %>% unique()
+  receptors_check <- receptors[which(receptors %in% rownames(seurat))]
+  
+  subset_mat <- as.matrix(seurat[["RNA"]]@data[receptors_check, cluster_cells])
+  subset_frq <- rowSums(subset_mat > 0) / ncol(subset_mat)
+  genes_keep <- rownames(subset_mat)[subset_frq >= 0.1]
+  return(genes_keep)
+}
+```
+
+```{r}
+receptor_interaction <- function(subset_name, ligand_heatmap, plot_width, plot_height){
+  #Get all cell types
+  subset_clusters <- subset_dict %>% filter(subset == subset_name) %>% pull(CellType)
+  
+  #Get ordered ligand list from heatmap object
+  ligand_order <- ligand_heatmap$gtable$grobs[[3]]$label
+  
+  #Define target receptors
+  receptors <- lr_network %>% pull(to) %>% unique()
+  ##Iterate through clusters checking for frequency of expressing cells
+  expressed_receptors <- lapply(subset_clusters, getFrequency)
+  expressed_receptors <- unique(unlist(expressed_receptors))
+  ##Filter network
+  lr_network_top = lr_network %>% 
+    filter(from %in% ligand_order & to %in% expressed_receptors) %>% 
+    distinct(from,to)
+  best_upstream_receptors = lr_network_top %>% pull(to) %>% unique()
+  
+  #Find ligand-receptor network
+  lr_network_top_df_large = weighted_networks_lr %>% 
+    filter(from %in% ligand_order & to %in% best_upstream_receptors)
+  ##Make a wide format
+  lr_network_top_df = lr_network_top_df_large %>% spread("from","weight",fill = 0)
+  lr_network_top_matrix = lr_network_top_df %>% 
+    select(-to) %>% 
+    as.matrix() %>% 
+    magrittr::set_rownames(lr_network_top_df$to)
+  
+  #Cluster receptors
+  dist_receptors = dist(lr_network_top_matrix, method = "binary")
+  hclust_receptors = hclust(dist_receptors, method = "ward.D2")
+  order_receptors = hclust_receptors$labels[hclust_receptors$order]
+  
+  #Test heatmap
+  receptor_mat <- t(lr_network_top_matrix[order_receptors, ligand_order])
+  
+  ligand_receptor_heatmap <- pheatmap(receptor_mat,
+         color = colorRampPalette(c("whitesmoke", "darkgreen"))(100),
+         breaks = seq(0, 1, length.out=101),
+         cluster_rows=F,
+         cluster_cols=F,
+         show_rownames=T,
+         show_colnames=T,
+         treeheight_row=0,
+         treeheight_col=0,
+         clustering_method="ward.D2",
+         border_color = "black",
+         filename=paste0(subset_name, "_receptor_activity.png"),
+         width=plot_width, 
+         height=plot_height)
+  return(ligand_receptor_heatmap)
+}
+```
+
+```{r}
+setwd("...")
+receptor_myeloid <- receptor_interaction("Myeloid", ligand_myeloid, 14, 4.5)
+receptor_endothelial <- receptor_interaction("Endothelial", ligand_endothelial, 12, 4.5)
+receptor_epithelial <- receptor_interaction("Epithelial", ligand_epithelial, 10, 2.5)
+receptor_stromal <- receptor_interaction("Stromal", ligand_stromal, 10, 2.5)
+```
+
+## Receptor expression in receivers
+
+```{r}
+getAvgExp <- function(cluster, gene_order){
+  cells <- colnames(seurat)[seurat$CellType == cluster]
+  avg <- rowMeans(as.matrix(seurat[["RNA"]]@data[gene_order,cells]))
+  return(avg)
+}
+```
+
+```{r}
+receptor_expression_heatmap <- function(receptor_heatmap, ligand_heatmap,
+                                      subset_name, plot_width, plot_height){
+  
+  #Get ligand list from heatmap
+  gene_order <- receptor_heatmap$gtable$grobs[[2]]$label
+  clusters <- ligand_heatmap$gtable$grobs[[2]]$label
+  
+  receptor_avg <- lapply(clusters, getAvgExp, gene_order=gene_order)
+  receptor_avg <- do.call("cbind", receptor_avg)
+  colnames(receptor_avg) <- clusters
+  
+  receptor_avg <- t(receptor_avg)
+  
+  ligand_exp_heatmap <- pheatmap(receptor_avg,
+         color = colorRampPalette(c("whitesmoke", "purple"))(100),
+         breaks = seq(0, 2, length.out=101),
+         cluster_rows=F,
+         cluster_cols=F,
+         show_rownames=T,
+         show_colnames=T,
+         treeheight_row=0,
+         treeheight_col=0,
+         legend=F,
+         border_color = "black",
+         filename=paste0(subset_name, "_receptor_expression.png"),
+         width=plot_width, 
+         height=plot_height)
+}
+```
+
+```{r}
+setwd("...")
+receptor_expression_heatmap(receptor_myeloid, ligand_myeloid, "Myeloid", 15, 1.15)
+receptor_expression_heatmap(receptor_endothelial, ligand_endothelial,"Endothelial", 13, 1.5)
+receptor_expression_heatmap(receptor_epithelial, ligand_epithelial, "Epithelial", 10, 0.8)
+receptor_expression_heatmap(receptor_stromal, ligand_stromal, "Stromal", 10, 1)
+```
+
+# Circos Plot
+
+```{r}
+library(Polychrome)
+```
+
+##Load Data
+```{r}
+setwd("...")
+seurat <- readRDS(file = "global_high_res.rds")
+```
+
+```{r}
+setwd("...")
+result_table <- read.csv(file = "dsa_results_global_high_res_min1.csv")
+```
+
+```{r}
+setwd("...")
+ligand_activities <- readRDS(file = "ligand_activities_global.rds")
+```
+
+```{r}
+setwd("...")
+ligand_target_matrix <- readRDS(file = "ligand_target_matrix.rds")
+ligand_target_matrix[1:5,1:5] # target genes in rows, ligands in columns
+```
+
+```{r}
+colnames(ligand_target_matrix) = ligand_target_matrix %>% colnames() %>% convert_human_to_mouse_symbols()
+rownames(ligand_target_matrix) = ligand_target_matrix %>% rownames() %>% convert_human_to_mouse_symbols()
+
+ligand_target_matrix = ligand_target_matrix %>% .[!is.na(rownames(ligand_target_matrix)), !is.na(colnames(ligand_target_matrix))]
+```
+
+##Recievers
+
+```{r}
+clusters <- result_table %>%
+  filter(p_adj.loc <= 0.05 &
+           abs(logFC) >= 0.5) %>%
+  filter(Ctrl.frq >= 0.05 | Treat_1wk.frq >= 0.05 | Treat_3wk.frq >= 0.05 | Treat_5wk.frq >= 0.05 | Treat_8wk.frq >= 0.05) %>%
+  select(cluster_id) %>%
+  group_by(cluster_id) %>%
+  summarise(nGene = n())
+clusters
+```
+
+```{r}
+receiver_clusters <- filter(clusters, nGene >= 50) %>%
+  pull(cluster_id)
+receiver_clusters
+```
+
+Geneset of interest (oi)
+```{r}
+geneset <- function(receiver){
+  geneset_oi <- filter(result_table, p_adj.loc <= 0.05 & 
+                       abs(logFC) >= 0.5 &
+                       cluster_id == receiver)
+  geneset_oi <- filter(geneset_oi, Ctrl.frq >= 0.05 | Treat_1wk.frq >= 0.05 | 
+                         Treat_3wk.frq >= 0.05 | Treat_5wk.frq >= 0.05 | 
+                         Treat_8wk.frq >= 0.05) %>% pull(gene)
+  return(geneset_oi)}
+```
+
+```{r}
+GS_oi <- lapply(receiver_clusters, geneset)
+```
+
+For just Activated Arterial
+```{r}
+geneset_oi_AA <- filter(result_table, p_adj.loc <= 0.05 & 
+                       abs(logFC) >= 0.5 &
+                       cluster_id == "Act. Arterial")
+geneset_oi_AA <- filter(geneset_oi_AA, Ctrl.frq >= 0.05 | Treat_1wk.frq >= 0.05 | 
+                         Treat_3wk.frq >= 0.05 | Treat_5wk.frq >= 0.05 | 
+                         Treat_8wk.frq >= 0.05) %>% pull(gene)
+```
+
+```{r}
+geneset_oi_AA = geneset_oi_AA %>% .[. %in% rownames(ligand_target_matrix)]
+```
+
+
+##Top Ligands
+
+```{r}
+top_lig_CM <- ligand_activities %>% filter(receiver_cluster == "Classical Mono") %>% top_n(10, pearson) %>% arrange(-pearson) %>% pull(test_ligand) %>% unique()
+top_lig_gCapTrans <- ligand_activities %>% filter(receiver_cluster == "gCap-Trans.") %>% top_n(10, pearson) %>% arrange(-pearson) %>% pull(test_ligand) %>% unique()
+```
+
+```{r}
+top_ligands <- c(top_lig_CM, top_lig_gCapTrans)
+```
+
+```{r}
+avg_expression_ligands = AverageExpression(seurat, features = top_lig_gCapTrans)
+```
+
+
+```{r}
+sender_ligand_assignment = avg_expression_ligands$RNA %>% apply(1, function(ligand_expression){
+  ligand_expression > (ligand_expression %>% mean() + ligand_expression %>% sd())
+  }) %>% t()
+
+sender_ligand_assignment = sender_ligand_assignment %>% apply(2, function(x){x[x == TRUE]}) %>% purrr::keep(function(x){length(x) > 0})
+
+names(sender_ligand_assignment)
+```
+
+```{r}
+all_assigned_ligands = sender_ligand_assignment %>% lapply(function(x){names(x)}) %>% unlist()
+unique_ligands = all_assigned_ligands %>% table() %>% .[. == 1] %>% names()
+general_ligands = top_lig_gCapTrans %>% setdiff(unique_ligands)
+```
+
+
+# Code from Ivana here for Circos Plot
+
+```{r}
+cell_type_order <- names(sender_ligand_assignment)
+```
+
+```{r}
+test_dat <- data.frame(Sender = "_", Ligand = top_lig_gCapTrans, Receiver = "gCap-Trans.")
+```
+
+```{r}
+test_dat_L <- data.frame(Sender = "_", Ligand = all_assigned_ligands, Receiver = "_")
+test_dat_L$Sender <- rownames(test_dat_L)
+test_dat_L$Sender <- substring(test_dat_L$Sender, 1, nchar(test_dat_L$Sender)-1)
+rownames(test_dat_L) <- 1:nrow(test_dat_L)
+```
+
+```{r}
+test_dat_L$Sender <- replace(test_dat_L$Sender, 14, "gCap-Cytoprotective")
+test_dat_L$Sender <- replace(test_dat_L$Sender, 15, "Clara cell")
+test_dat_L$Sender <- replace(test_dat_L$Sender, 22, "Neutrophils")
+test_dat_L$Sender <- replace(test_dat_L$Sender, 31, "Trans. Mono")
+test_dat_L$Sender <- replace(test_dat_L$Sender, 32, "Mreg+ DC")
+test_dat_L$Sender <- replace(test_dat_L$Sender, 40, "Mesothelial")
+```
+
+```{r}
+test_dat_join <- full_join(test_dat_L, test_dat, by ="Ligand")
+test_dat_join <- rename(test_dat_join, Sender = Sender.x)
+test_dat_join <- rename(test_dat_join, Receiver = Receiver.y)
+test_dat_join <- select(test_dat_join, Sender, Ligand, Receiver)
+```
+
+```{r}
+test_dat <- test_dat_join
+rm(test_dat_join, test_dat_L)
+```
+
+```{r}
+write.csv(test_dat, file = "LR_gCapTrans_Summary_Top10_3d.csv")
+```
+
+```{r}
+test_dat <- arrange(test_dat, match(Sender, cell_type_order), Ligand)
+test_dat$from <- paste0(test_dat$Sender, "_", test_dat$Ligand)
+test_dat$to <- test_dat$Receiver
+test_dat$value <- 1
+df <- data.frame(from = test_dat$from,
+                 to = test_dat$to,
+                 value = test_dat$value)
+```
+
+#Set up break distances between sectors for ligand senders
+```{r}
+ligand_counts <- test_dat[,c("Sender", "Ligand")]
+ligand_counts <- unique(ligand_counts)
+ligand_counts <- table(ligand_counts$Sender)[cell_type_order]
+receiver_count <- length(unique(test_dat$Receiver))
+
+gaps <- c(rep(1.25, ligand_counts[1]-1), 5,
+          rep(1.25, ligand_counts[2]-1), 5,
+          rep(1.25, ligand_counts[3]-1), 5,
+          rep(1.25, ligand_counts[4]-1), 5,
+          rep(1.25, ligand_counts[5]-1), 5,
+          rep(1.25, ligand_counts[6]-1), 5,
+          rep(1.25, ligand_counts[7]-1), 5,
+          rep(1.25, ligand_counts[8]-1), 5,
+          rep(1.25, ligand_counts[9]-1), 5,
+          rep(1.25, ligand_counts[10]-1), 5,
+          rep(1.25, ligand_counts[11]-1), 5,
+          rep(1.25, ligand_counts[12]-1), 5,
+          rep(1.25, ligand_counts[13]-1), 5,
+          rep(1.25, ligand_counts[14]-1), 5,
+          rep(1.25, ligand_counts[15]-1), 5,
+          rep(1.25, ligand_counts[16]-1), 5,
+          rep(1.25, ligand_counts[17]-1), 5,
+          rep(1.25, ligand_counts[18]-1), 5,
+          rep(1.25, ligand_counts[19]-1), 5,
+          rep(1.25, ligand_counts[20]-1), 5,
+          rep(1.25, ligand_counts[21]-1), 10, #Left sender-receiver border
+          rep(1.25, receiver_count-1), 10) #Receiver end
+```
+
+#Sender cell types
+```{r}
+sender_list <- unique(test_dat$Sender)
+receiver_list <- unique(test_dat$Receiver)
+```
+
+#Prepare Colours
+
+```{r}
+pdf("Circos_plot_gCapTrans_3d.pdf",
+    width=10, height=10)
+
+cols <- palette36.colors()[1:21]
+names(cols) <- sender_list
+test_dat$cols <- cols[test_dat$Sender] 
+cols <- test_dat[,c("from", "cols")]
+cols <- unique(cols)
+tmp_names <- cols$from
+cols <- cols$cols
+names(cols) <- tmp_names
+cols <- c(cols, rep("grey40", length(receiver_list)))
+names(cols)[45] <- receiver_list #Adjust index to appropriate length
+
+circos.clear()
+circos.par(track.height=0.125, gap.after=gaps)
+
+chordDiagram(df,annotationTrack=c("grid"), scale=F,
+             preAllocateTracks=3,
+             directional=1,
+             grid.col=cols)
+
+tmp <- test_dat[,c("from","Ligand")]
+tmp <- unique(tmp)
+
+circos.track(track.index=3, track.height= uh(1, "inches"),
+             panel.fun=function(x,y){
+               circos.text(CELL_META$xcenter, CELL_META$ylim[1], tmp$Ligand[CELL_META$sector.numeric.index],
+                           facing="clockwise", cex=0.75,
+                           niceFacing = T, adj=c(0, 0.5))},
+             bg.border=NA)
+
+for(i in 1:length(sender_list)){
+  ligand_list <- test_dat %>% filter(Sender == sender_list[i]) %>% pull(from)
+  highlight.sector(ligand_list, track.index = 2, col = "grey80",
+                   #text = sender_list[i],  cex = 0.8, text.col = "black",
+                   niceFacing = T, border = T, padding = c(0,0, -0.75, 0))
+}
+
+for(i in 1:length(sender_list)){
+  ligand_list <- test_dat %>% filter(Sender == sender_list[i]) %>% pull(from)
+  highlight.sector(ligand_list, track.index = 1, col = "white",
+                   text = sender_list[i],  cex = 0.8, text.col = "black",
+                   facing = "clockwise", niceFacing = T, border = F, 
+                   padding = c(0,0, 0, 0))
+}
+
+for(i in 1:length(receiver_list)){
+  R_list <- test_dat %>% filter(Receiver == receiver_list[i]) %>% pull(to)
+  highlight.sector(R_list, track.index = 3, col = "white",
+                   text = receiver_list[i],  cex = 0.8, text.col = "black",
+                   facing = "bending", niceFacing = T, border = F, 
+                   padding = c(0,0, 0, 0))
+}
+
+dev.off()
+```
+
+
+__________________________
+__________________________
+# 5 day Analysis
+__________________________
+__________________________
+
+# Load the data
+```{r}
+setwd("...")
+result_table <- read.csv(file = "mouse_dsa_results_global_high_res_min1cell.csv")
+```
+
+```{r}
+setwd("...")
+seurat <- readRDS(file = "mouse_global_high_res.rds")
+```
+
+
+# Prepare NicheNet Prior Model
+
+```{r}
+ligand_target_matrix <- readRDS(url("https://zenodo.org/record/3260758/files/ligand_target_matrix.rds"))
+ligand_target_matrix[1:5,1:5] # target genes in rows, ligands in columns
+```
+
+```{r}
+ligand_target_matrix <- readRDS(file ="~/DATA/NicheNet/ligand_target_matrix.rds")
+ligand_target_matrix[1:5,1:5] # target genes in rows, ligands in columns
+```
+
+```{r}
+lr_network <- readRDS(url("https://zenodo.org/record/3260758/files/lr_network.rds"))
+head(lr_network)
+```
+
+```{r}
+weighted_networks <- readRDS(url("https://zenodo.org/record/3260758/files/weighted_networks.rds"))
+weighted_networks_lr = weighted_networks$lr_sig %>% inner_join(lr_network %>% distinct(from,to), by = c("from","to"))
+```
+
+```{r}
+weighted_networks <- readRDS(file = "~/DATA/NicheNet/weighted_networks.rds")
+weighted_networks_lr = weighted_networks$lr_sig %>% inner_join(lr_network %>% distinct(from,to), by = c("from","to"))
+```
+
+```{r}
+lr_network = lr_network %>% mutate(from = convert_human_to_mouse_symbols(from), to = convert_human_to_mouse_symbols(to)) %>% drop_na()
+colnames(ligand_target_matrix) = ligand_target_matrix %>% colnames() %>% convert_human_to_mouse_symbols()
+rownames(ligand_target_matrix ) = ligand_target_matrix %>% rownames() %>% convert_human_to_mouse_symbols()
+
+ligand_target_matrix = ligand_target_matrix %>% .[!is.na(rownames(ligand_target_matrix)), !is.na(colnames(ligand_target_matrix))]
+
+weighted_networks_lr = weighted_networks_lr %>% mutate(from = convert_human_to_mouse_symbols(from), to = convert_human_to_mouse_symbols(to)) %>% drop_na()
+```
+
+# Run NicheNet
+
+```{r}
+clusters <- result_table %>%
+  filter(contrast == "DPT_5d-Ctrl") %>%
+  filter(p_adj.loc <= 0.05 &
+           abs(logFC) >= 0.5) %>%
+  filter(Ctrl.frq >= 0.05 | DPT_3d.frq >= 0.05 | DPT_5d.frq >= 0.05 | DTP_7d.frq >= 0.05) %>%
+  select(cluster_id) %>%
+  group_by(cluster_id) %>%
+  summarise(nGene = n())
+clusters
+```
+
+```{r}
+receiver_clusters <- filter(clusters, nGene >= 50) %>%
+  pull(cluster_id)
+receiver_clusters
+```
+
+```{r}
+getFrequency <- function(cluster){
+  cluster_cells <- colnames(seurat)[Idents(seurat) == cluster]
+  
+  subset_mat <- as.matrix(seurat[["RNA"]]@data[, cluster_cells])
+  subset_frq <- rowSums(subset_mat > 0) / ncol(subset_mat)
+  genes_keep <- rownames(subset_mat)[subset_frq >= 0.1]
+  return(genes_keep)
+}
+```
+
+
+```{r}
+runNicheNet <- function(receiver){
+  print(paste0("Performing analysis on cluster: ", receiver))
+  #define receiver
+  expressed_genes_receiver <- getFrequency(receiver)
+  background_expressed_genes <- expressed_genes_receiver %>% .[. %in% rownames(ligand_target_matrix)]
+  
+  #define senders
+  sender_celltypes <- clusters$cluster_id[which(clusters$cluster_id %in% result_table$cluster_id)]
+  sender_celltypes <- sender_celltypes[-1] #removes doublets
+  list_expressed_genes_sender <- sender_celltypes %>% unique() %>% lapply(getFrequency) 
+  expressed_genes_sender <- list_expressed_genes_sender %>% unlist() %>% unique()
+  
+  #get PAH genes of interest
+  geneset_oi <- filter(result_table, p_adj.loc <= 0.05 & 
+                       abs(logFC) >= 0.5 &
+                       cluster_id == receiver)
+  geneset_oi <- filter(geneset_oi, Ctrl.frq >= 0.05 | DPT_3d.frq >= 0.05 | DPT_5d.frq >= 0.05 | DTP_7d.frq >= 0.05) %>% pull(gene)
+  
+  #define potential ligands for genes
+  ligands <- lr_network %>% pull(from) %>% unique()
+  receptors <- lr_network %>% pull(to) %>% unique()
+  expressed_ligands <- intersect(ligands,expressed_genes_sender)
+  expressed_receptors <- intersect(receptors,expressed_genes_receiver)
+  potential_ligands <- lr_network %>% 
+    filter(from %in% expressed_ligands & to %in% expressed_receptors) %>% 
+    pull(from) %>% 
+    unique()
+  
+  #perform nichenet ligand activity analysis: rank potential ligands based on the presence
+  #of their target genes in the gene set of interest (compared to the background set of genes)
+  ligand_activities <- predict_ligand_activities(geneset = geneset_oi,  background_expressed_genes = background_expressed_genes, ligand_target_matrix = ligand_target_matrix, potential_ligands = potential_ligands)
+  ligand_activities <- ligand_activities %>% arrange(-pearson) %>% mutate(rank = rank(dplyr::desc(pearson)))
+  ligand_activities$receiver_cluster <- receiver
+  
+  return(ligand_activities)
+}
+```
+
+
+```{r}
+Sys.time()
+ligand_activities <- lapply(receiver_clusters, runNicheNet) 
+Sys.time()
+```
+
+```{r}
+ligand_activities <- do.call("rbind", ligand_activities)
+```
+
+```{r}
+pearson_scores <- ggplot(ligand_activities, aes(x=receiver_cluster, y=pearson)) + 
+  geom_jitter(size=0.25) + 
+  theme_bw() + 
+  theme(axis.text.x=element_text(angle=45, hjust=1))
+pearson_scores
+```
+
+# Save Point
+
+```{r}
+setwd("...")
+saveRDS(ligand_activities, file = "ligand_activities_global_5days.rds")
+```
+
+```{r}
+setwd("...")
+write.csv(ligand_activities, file = "ligand_activities_global_5days.csv")
+```
+
+#Load Data
+```{r}
+setwd("...")
+ligand_activities <- readRDS(file = "ligand_activities_global_5days.rds")
+```
+
+```{r}
+subset_dict <- data.frame(subset = seurat$cluster_high_res,
+                          CellType = seurat$CellType)
+subset_dict <- unique(subset_dict)
+subset_dict <- separate(subset_dict, subset, c("subset", "clusterID"))
+subset_dict$clusterID <- NULL
+subset_dict$subset <- as.character(subset_dict$subset)
+subset_dict$CellType <- as.character(subset_dict$CellType)
+```
+
+# Visualize
+
+```{r}
+best_upstream_lig_AT2 <- ligand_activities %>% filter(receiver_cluster == "AT2 cell") %>% top_n(20, pearson) %>% arrange(-pearson) %>% pull(test_ligand) %>% unique()
+best_upstream_lig_Art <- ligand_activities %>% filter(receiver_cluster == "Arterial") %>% top_n(20, pearson) %>% arrange(-pearson) %>% pull(test_ligand) %>% unique()
+best_upstream_lig_AM <- ligand_activities %>% filter(receiver_cluster == "Alv. Mac") %>% top_n(20, pearson) %>% arrange(-pearson) %>% pull(test_ligand) %>% unique()
+best_upstream_lig_Ven <- ligand_activities %>% filter(receiver_cluster == "Venous") %>% top_n(20, pearson) %>% arrange(-pearson) %>% pull(test_ligand) %>% unique()
+best_upstream_lig_aCap <- ligand_activities %>% filter(receiver_cluster == "aCap") %>% top_n(20, pearson) %>% arrange(-pearson) %>% pull(test_ligand) %>% unique()
+best_upstream_lig_gCap <- ligand_activities %>% filter(receiver_cluster == "gCap") %>% top_n(20, pearson) %>% arrange(-pearson) %>% pull(test_ligand) %>% unique()
+best_upstream_lig_gCapTrans <- ligand_activities %>% filter(receiver_cluster == "gCap-Trans.") %>% top_n(20, pearson) %>% arrange(-pearson) %>% pull(test_ligand) %>% unique()
+```
+
+
+```{r}
+DotPlot(seurat, features = best_upstream_lig_AT2 %>% rev(), cols = "RdYlBu") + RotatedAxis()
+DotPlot(seurat, features = best_upstream_lig_AM %>% rev(), cols = "RdYlBu") + RotatedAxis()
+DotPlot(seurat, features = best_upstream_lig_Art %>% rev(), cols = "RdYlBu") + RotatedAxis()
+DotPlot(seurat, features = best_upstream_lig_Ven %>% rev(), cols = "RdYlBu") + RotatedAxis()
+DotPlot(seurat, features = best_upstream_lig_aCap %>% rev(), cols = "RdYlBu") + RotatedAxis()
+DotPlot(seurat, features = best_upstream_lig_gCap %>% rev(), cols = "RdYlBu") + RotatedAxis()
+DotPlot(seurat, features = best_upstream_lig_gCapTrans %>% rev(), cols = "RdYlBu") + RotatedAxis()
+```
+## Pearson score - heatmap of ligand activities
+
+```{r}
+receiver_clusters_EC <- c("Arterial", "Venous", "aCap", "gCap", "gCap-Trans.")
+```
+
+```{r}
+best_upstream_lig_Art <- ligand_activities %>% filter(receiver_cluster == "Arterial") %>% top_n(10, pearson) %>% arrange(-pearson) %>% pull(test_ligand) %>% unique() %>% rev()
+best_upstream_lig_Ven <- ligand_activities %>% filter(receiver_cluster == "Venous") %>% top_n(10, pearson) %>% arrange(-pearson) %>% pull(test_ligand) %>% unique() %>% rev()
+best_upstream_lig_aCap <- ligand_activities %>% filter(receiver_cluster == "aCap") %>% top_n(10, pearson) %>% arrange(-pearson) %>% pull(test_ligand) %>% unique() %>% rev()
+best_upstream_lig_gCap <- ligand_activities %>% filter(receiver_cluster == "gCap") %>% top_n(10, pearson) %>% arrange(-pearson) %>% pull(test_ligand) %>% unique() %>% rev()
+best_upstream_lig_gCapTrans <- ligand_activities %>% filter(receiver_cluster == "gCap-Trans.") %>% top_n(10, pearson) %>% arrange(-pearson) %>% pull(test_ligand) %>% unique() %>% rev()
+```
+
+```{r}
+top_ligands <- data.frame(c(best_upstream_lig_Art, best_upstream_lig_Ven, best_upstream_lig_aCap, best_upstream_lig_gCap, best_upstream_lig_gCapTrans))
+top_ligands <- distinct(top_ligands)
+top_lig <- top_ligands$c.best_upstream_lig_Art..best_upstream_lig_Ven..best_upstream_lig_aCap..
+```
+
+```{r}
+ligand_activities_Art <- filter(ligand_activities, receiver_cluster == "Arterial")
+ligand_activities_Ven <- filter(ligand_activities, receiver_cluster == "Venous")
+ligand_activities_aCap <- filter(ligand_activities, receiver_cluster == "aCap")
+ligand_activities_gCap <- filter(ligand_activities, receiver_cluster == "gCap")
+ligand_activities_gCapT <- filter(ligand_activities, receiver_cluster == "gCap-Trans.")
+```
+
+```{r}
+ligand_activities_EC <- filter(ligand_activities, receiver_cluster != "AT2 cell")
+ligand_activities_EC <- filter(ligand_activities_EC, receiver_cluster != "Alv. Mac")
+```
+
+```{r}
+scale_limits <- c(0, 0.18)
+```
+
+```{r}
+ligand_pearson_matrix <- ligand_activities_gCapT %>% select(test_ligand, pearson) %>% as.data.frame()
+ligand_pearson_matrix <- filter(ligand_pearson_matrix, test_ligand %in% best_upstream_lig_gCapTrans)
+p_ligand_pearson <- ggplot(ligand_pearson_matrix, aes(x=reorder(test_ligand, pearson), "gCap-Trans.", fill = pearson)) +
+  geom_tile(color = "white", lwd = 1) +
+  scale_fill_gradient(low = "white", high = "darkorange", 
+                      limits = scale_limits) +
+  coord_flip() + 
+  theme_classic() +
+  xlab("Prioritized Ligand") +
+  ylab("Receiver Cluster")
+p_ligand_pearson
+ggsave(filename = "Day5 Ligand Activity Score_gCapTrans.png", plot = p_ligand_pearson, height = 5, width = 2.25, dpi = 300)
+```
+
+```{r}
+ligand_pearson_matrix <- ligand_activities_EC %>% select(test_ligand, pearson, receiver_cluster) %>% as.data.frame()
+```
+
+```{r}
+ligand_pearson_matrix2 <- filter(ligand_pearson_matrix, test_ligand %in% top_ligands$c.best_upstream_lig_Art..best_upstream_lig_Ven..best_upstream_lig_aCap..) #filtering out the top 10 unique ligands from all EC clusters
+ligand_pearson_matrix3 <- pivot_wider(ligand_pearson_matrix2, names_from = "receiver_cluster", values_from = "pearson")
+ligand_pearson_matrix3[is.na(ligand_pearson_matrix3)] <- 0
+```
+
+```{r}
+vis_ligand_pearson <- ligand_pearson_matrix3 %>% as.matrix %>% magrittr::set_rownames(ligand_pearson_matrix3$test_ligand)
+vis_ligand_pearson <- vis_ligand_pearson[,colnames(vis_ligand_pearson) != "test_ligand"]
+```
+
+```{r}
+p_ligand_pearson <- ggplot(ligand_pearson_matrix2, aes(x=reorder(test_ligand, pearson), receiver_cluster, fill = pearson)) +
+  geom_tile(color = "white", lwd = 1) +
+  scale_fill_gradient(low = "white", high = "darkorange") +
+  coord_flip() + 
+  theme_classic() +
+  theme(axis.text.x = element_text(angle=45, hjust = 1)) +
+  xlab("Prioritized Ligand") +
+  ylab("Receiver Cluster")
+p_ligand_pearson
+```
+
+```{r}
+ggsave(filename = "Day5 Ligand Activity Scores.png", plot = p_ligand_pearson, height = 9, width = 4, dpi = 300)
+```
+
+```{r}
+lig_pear_matrix_Art = ligand_activities_Art %>% select(pearson) %>% as.matrix() %>% magrittr::set_rownames(ligand_activities_Art$test_ligand)
+
+rownames(lig_pear_matrix_Art) = rownames(lig_pear_matrix_Art) %>% make.names()
+colnames(lig_pear_matrix_Art) = colnames(lig_pear_matrix_Art) %>% make.names()
+
+vis_ligand_pearson_Art = lig_pear_matrix_Art[best_upstream_lig_Art, ] %>% as.matrix(ncol = 1) %>% magrittr::set_colnames("Arterial")
+```
+
+```{r}
+p_ligand_pearson = vis_ligand_pearson_Art %>% make_heatmap_ggplot("Prioritized ligands","Ligand activity", color = "darkorange",legend_position = "top", x_axis_position = "top", legend_title = "Pearson correlation coefficient\ntarget gene prediction ability)") + theme(legend.text = element_text(size = 9))
+p_ligand_pearson
+```
+
+## Active target gene inference
+
+```{r}
+geneset_oi <- result_table %>% filter(cluster_id == "gCap-Trans." &
+                                        p_adj.loc <= 0.05 & 
+                                        abs(logFC) >= 0.25 &
+                                        contrast == "DPT_5d-Ctrl") %>% pull(gene)
+geneset_oi = geneset_oi %>% .[. %in% rownames(ligand_target_matrix)]
+```
+
+```{r}
+active_ligand_target_links_df = best_upstream_lig_gCapTrans %>% lapply(get_weighted_ligand_target_links,geneset = geneset_oi, ligand_target_matrix = ligand_target_matrix, n = 200) %>% bind_rows() %>% drop_na()
+
+active_ligand_target_links = prepare_ligand_target_visualization(ligand_target_df = active_ligand_target_links_df, ligand_target_matrix = ligand_target_matrix, cutoff = 0.33)
+
+order_ligands = intersect(best_upstream_lig_gCapTrans, colnames(active_ligand_target_links)) %>% rev() %>% make.names()
+order_targets = active_ligand_target_links_df$target %>% unique() %>% intersect(rownames(active_ligand_target_links)) %>% make.names()
+rownames(active_ligand_target_links) = rownames(active_ligand_target_links) %>% make.names() # make.names() for heatmap visualization of genes like H2-T23
+colnames(active_ligand_target_links) = colnames(active_ligand_target_links) %>% make.names() # make.names() for heatmap visualization of genes like H2-T23
+
+vis_ligand_target = active_ligand_target_links[order_targets,order_ligands] %>% t()
+```
+
+```{r}
+p_ligand_target_network = vis_ligand_target %>% make_heatmap_ggplot("Prioritized ligands","Predicted target genes", color = "purple",legend_position = "top", x_axis_position = "top",legend_title = "Regulatory potential")  + theme(axis.text.x = element_text(face = "italic")) + scale_fill_gradient2(low = "whitesmoke",  high = "purple", breaks = c(0,0.0045,0.0090))
+p_ligand_target_network
+```
+
+# Ligand Activity
+
+```{r}
+ligand_auroc_heatmap <- function(subset_name, plot_width, plot_height){
+  
+  subset_clusters <- subset_dict %>% filter(subset == subset_name) %>% pull(CellType)
+  
+  ligands <- ligand_activities %>%
+    filter(receiver_cluster %in% subset_clusters &
+           rank <= 10)
+  
+  ligand_mat <- ligands[,c("test_ligand", "auroc", "receiver_cluster")]
+  ligand_mat <- pivot_wider(ligand_mat, names_from="receiver_cluster", values_from="auroc")
+  ligand_mat <- as.data.frame(ligand_mat)
+  ligand_list <- ligand_mat$test_ligand
+  cell_types <- colnames(ligand_mat)[2:ncol(ligand_mat)]
+  ligand_mat <- as.matrix(ligand_mat[,2:ncol(ligand_mat)])
+  rownames(ligand_mat) <- ligand_list
+  colnames(ligand_mat) <- cell_types
+  ligand_mat[is.na(ligand_mat)] <- 0
+  ligand_mat[ligand_mat > 0] <- 1
+  
+  #Can't do clustered columns if only one cell type
+  if(length(unique(ligands$receiver_cluster)) > 1){
+    ligand_heatmap <- pheatmap(ligand_mat,
+         color = c("whitesmoke", "firebrick"),
+         legend = F,
+         cluster_rows=T,
+         cluster_cols=T,
+         show_rownames=T,
+         show_colnames=T,
+         treeheight_row=0,
+         treeheight_col=0,
+         clustering_method="ward.D2",
+         border_color = "black",
+         filename=paste0(subset_name, "_ligand_activity.png"),
+         width = plot_width,
+         height = plot_height)
+  } else{
+    ligand_heatmap <- pheatmap(ligand_mat,
+         color = c("firebrick", "firebrick"),
+         breaks = c(0,1),
+         legend = F,
+         cluster_rows=F,
+         cluster_cols=F,
+         show_rownames=T,
+         show_colnames=T,
+         treeheight_row=0,
+         treeheight_col=0,
+         clustering_method="ward.D2",
+         border_color = "black",
+         filename=paste0(subset_name, "_ligand_activity.png"),
+         width = plot_width,
+         height = plot_height)
+  }
+  
+  return(ligand_heatmap)
+}
+```
+
+```{r}
+unique(subset_dict$subset)
+```
+
+```{r}
+setwd("...")
+ligand_endothelial <- ligand_auroc_heatmap("Endothelial", 1.3, 5.4)
+ligand_epithelial <- ligand_auroc_heatmap("Epithelial", 1, 4)
+ligand_myeloid <- ligand_auroc_heatmap("Myeloid", 1.2, 5.1)
+ligand_stromal <- ligand_auroc_heatmap("Stromal", 1, 4)
+#ligand_lymphoid <- ligand_auroc_heatmap("Lymphoid", 2, 6)
+
+```
+
+```{r}
+getAvgExp <- function(cluster, gene_order){
+  cells <- colnames(seurat)[seurat$CellType == cluster]
+  avg <- rowMeans(as.matrix(seurat[["RNA"]]@data[gene_order,cells]))
+  return(avg)
+}
+```
+
+```{r}
+ligand_expression_heatmap <- function(ligand_heatmap, subset_name,
+                                      plot_height){
+  
+  #Get ligand list from heatmap
+  gene_order <- ligand_heatmap$gtable$grobs[[3]]$label
+  
+  clusters <- levels(Idents(seurat))
+  ligand_avg <- lapply(clusters, getAvgExp, gene_order=gene_order)
+  ligand_avg <- do.call("cbind", ligand_avg)
+  colnames(ligand_avg) <- clusters
+  
+  ligand_exp_heatmap <- pheatmap(ligand_avg,
+         color = colorRampPalette(c("whitesmoke", "purple"))(100),
+         breaks = seq(0, 2, length.out=101),
+         cluster_rows=F,
+         cluster_cols=F,
+         show_rownames=T,
+         show_colnames=T,
+         treeheight_row=0,
+         treeheight_col=0,
+         clustering_method="ward.D2",
+         border_color = "black",
+         filename=paste0(subset_name, "_ligand_expression.png"),
+         width=7, 
+         height=plot_height)
+  
+}
+```
+
+```{r}
+setwd("...")
+ligand_expression_heatmap(ligand_myeloid, "Myeloid", 4)
+ligand_expression_heatmap(ligand_epithelial, "Epithelial", 3)
+ligand_expression_heatmap(ligand_endothelial, "Endothelial", 5.25)
+ligand_expression_heatmap(ligand_stromal, "Stromal", 3)
+```
+
+## Fold change in PAH
+```{r}
+getFoldChange <- function(cluster, gene_order){
+  filtered_table <- filter(result_table, cluster_id == cluster &
+                             p_adj.loc <= 0.05 & 
+                             contrast == "Treat_1wk-Ctrl")
+  
+  fc <- filtered_table$logFC
+  names(fc) <- filtered_table$gene
+  fc <- fc[gene_order]
+  names(fc) <- gene_order
+  fc[is.na(fc)] <- 0
+  
+  return(fc)
+}
+```
+
+```{r}
+ligand_fc_heatmap <- function(ligand_heatmap, subset_name, plot_height){
+  gene_order <- ligand_heatmap$gtable$grobs[[3]]$label
+  clusters <- levels(Idents(seurat))
+  
+  fold_change <- lapply(clusters, getFoldChange, gene_order = gene_order)
+  
+  fold_change <- do.call("cbind", fold_change)
+  colnames(fold_change) <- clusters
+  
+  ligand_fc_heatmap <- pheatmap(fold_change,
+         color = colorRampPalette(rev(brewer.pal(7, "RdBu")))(100),
+         breaks = seq(-2, 2, length.out=101),
+         cluster_rows=F,
+         cluster_cols=F,
+         show_rownames=T,
+         show_colnames=T,
+         treeheight_row=0,
+         treeheight_col=0,
+         clustering_method="ward.D2",
+         border_color = "black",
+         filename=paste0(subset_name, "_ligand_foldchange.png"),
+         width=7, height=plot_height)
+}
+```
+
+```{r}
+setwd("...")
+ligand_fc_heatmap(ligand_stromal, "Stromal", 3)
+ligand_fc_heatmap(ligand_myeloid, "Myeloid", 4)
+ligand_fc_heatmap(ligand_epithelial, "Epithelial", 3)
+ligand_fc_heatmap(ligand_endothelial, "Endothelial", 5.25)
+```
+
+# Receptor Visuliazation
+
+## Receptor-ligand interactions
+
+```{r}
+getFrequency <- function(cluster){
+  cluster_cells <- colnames(seurat)[Idents(seurat) == cluster]
+  receptors <- lr_network %>% pull(to) %>% unique()
+  receptors_check <- receptors[which(receptors %in% rownames(seurat))]
+  
+  subset_mat <- as.matrix(seurat[["RNA"]]@data[receptors_check, cluster_cells])
+  subset_frq <- rowSums(subset_mat > 0) / ncol(subset_mat)
+  genes_keep <- rownames(subset_mat)[subset_frq >= 0.1]
+  return(genes_keep)
+}
+```
+
+```{r}
+receptor_interaction <- function(subset_name, ligand_heatmap, plot_width, plot_height){
+  #Get all cell types
+  subset_clusters <- subset_dict %>% filter(subset == subset_name) %>% pull(CellType)
+  
+  #Get ordered ligand list from heatmap object
+  ligand_order <- ligand_heatmap$gtable$grobs[[3]]$label
+  
+  #Define target receptors
+  receptors <- lr_network %>% pull(to) %>% unique()
+  ##Iterate through clusters checking for frequency of expressing cells
+  expressed_receptors <- lapply(subset_clusters, getFrequency)
+  expressed_receptors <- unique(unlist(expressed_receptors))
+  ##Filter network
+  lr_network_top = lr_network %>% 
+    filter(from %in% ligand_order & to %in% expressed_receptors) %>% 
+    distinct(from,to)
+  best_upstream_receptors = lr_network_top %>% pull(to) %>% unique()
+  
+  #Find ligand-receptor network
+  lr_network_top_df_large = weighted_networks_lr %>% 
+    filter(from %in% ligand_order & to %in% best_upstream_receptors)
+  ##Make a wide format
+  lr_network_top_df = lr_network_top_df_large %>% spread("from","weight",fill = 0)
+  lr_network_top_matrix = lr_network_top_df %>% 
+    select(-to) %>% 
+    as.matrix() %>% 
+    magrittr::set_rownames(lr_network_top_df$to)
+  
+  #Cluster receptors
+  dist_receptors = dist(lr_network_top_matrix, method = "binary")
+  hclust_receptors = hclust(dist_receptors, method = "ward.D2")
+  order_receptors = hclust_receptors$labels[hclust_receptors$order]
+  
+  #Test heatmap
+  receptor_mat <- t(lr_network_top_matrix[order_receptors, ligand_order])
+  
+  ligand_receptor_heatmap <- pheatmap(receptor_mat,
+         color = colorRampPalette(c("whitesmoke", "darkgreen"))(100),
+         breaks = seq(0, 1, length.out=101),
+         cluster_rows=F,
+         cluster_cols=F,
+         show_rownames=T,
+         show_colnames=T,
+         treeheight_row=0,
+         treeheight_col=0,
+         clustering_method="ward.D2",
+         border_color = "black",
+         filename=paste0(subset_name, "_receptor_activity.png"),
+         width=plot_width, 
+         height=plot_height)
+  return(ligand_receptor_heatmap)
+}
+```
+
+```{r}
+setwd("...")
+receptor_myeloid <- receptor_interaction("Myeloid", ligand_myeloid, 14, 4.5)
+receptor_endothelial <- receptor_interaction("Endothelial", ligand_endothelial, 12, 4.5)
+receptor_epithelial <- receptor_interaction("Epithelial", ligand_epithelial, 10, 2.5)
+receptor_stromal <- receptor_interaction("Stromal", ligand_stromal, 10, 2.5)
+```
+
+## Receptor expression in receivers
+
+```{r}
+getAvgExp <- function(cluster, gene_order){
+  cells <- colnames(seurat)[seurat$CellType == cluster]
+  avg <- rowMeans(as.matrix(seurat[["RNA"]]@data[gene_order,cells]))
+  return(avg)
+}
+```
+
+```{r}
+receptor_expression_heatmap <- function(receptor_heatmap, ligand_heatmap,
+                                      subset_name, plot_width, plot_height){
+  
+  #Get ligand list from heatmap
+  gene_order <- receptor_heatmap$gtable$grobs[[2]]$label
+  clusters <- ligand_heatmap$gtable$grobs[[2]]$label
+  
+  receptor_avg <- lapply(clusters, getAvgExp, gene_order=gene_order)
+  receptor_avg <- do.call("cbind", receptor_avg)
+  colnames(receptor_avg) <- clusters
+  
+  receptor_avg <- t(receptor_avg)
+  
+  ligand_exp_heatmap <- pheatmap(receptor_avg,
+         color = colorRampPalette(c("whitesmoke", "purple"))(100),
+         breaks = seq(0, 2, length.out=101),
+         cluster_rows=F,
+         cluster_cols=F,
+         show_rownames=T,
+         show_colnames=T,
+         treeheight_row=0,
+         treeheight_col=0,
+         legend=F,
+         border_color = "black",
+         filename=paste0(subset_name, "_receptor_expression.png"),
+         width=plot_width, 
+         height=plot_height)
+}
+```
+
+```{r}
+setwd("...")
+receptor_expression_heatmap(receptor_myeloid, ligand_myeloid, "Myeloid", 15, 1.15)
+receptor_expression_heatmap(receptor_endothelial, ligand_endothelial,"Endothelial", 13, 1.5)
+receptor_expression_heatmap(receptor_epithelial, ligand_epithelial, "Epithelial", 10, 0.8)
+receptor_expression_heatmap(receptor_stromal, ligand_stromal, "Stromal", 10, 1)
+```
+
+# Circos Plot
+
+```{r}
+library(Polychrome)
+```
+
+##Load Data
+```{r}
+setwd("...")
+seurat <- readRDS(file = "mouse_global_high_res.rds")
+```
+
+```{r}
+setwd("...")
+result_table <- read.csv(file = "mouse_dsa_results_global_high_res_min1cell.csv")
+```
+
+```{r}
+setwd("...")
+ligand_activities <- readRDS(file = "ligand_activities_global_5days.rds")
+```
+
+
+```{r}
+colnames(ligand_target_matrix) = ligand_target_matrix %>% colnames() %>% convert_human_to_mouse_symbols()
+rownames(ligand_target_matrix) = ligand_target_matrix %>% rownames() %>% convert_human_to_mouse_symbols()
+
+ligand_target_matrix = ligand_target_matrix %>% .[!is.na(rownames(ligand_target_matrix)), !is.na(colnames(ligand_target_matrix))]
+```
+
+##Recievers
+
+```{r}
+clusters <- result_table %>%
+  filter(contrast == "DPT_5d-Ctrl") %>%
+  filter(p_adj.loc <= 0.05 &
+           abs(logFC) >= 0.5) %>%
+  filter(Ctrl.frq >= 0.05 | DPT_3d.frq >= 0.05 | DPT_5d.frq >= 0.05 | DTP_7d.frq >= 0.05) %>%
+  select(cluster_id) %>%
+  group_by(cluster_id) %>%
+  summarise(nGene = n())
+clusters
+```
+
+```{r}
+receiver_clusters <- filter(clusters, nGene >= 50) %>%
+  pull(cluster_id)
+receiver_clusters
+```
+
+```{r}
+geneset <- function(receiver){
+  geneset_oi <- filter(result_table, p_adj.loc <= 0.05 & 
+                       abs(logFC) >= 0.5 &
+                       cluster_id == receiver)
+  geneset_oi <- filter(geneset_oi, Ctrl.frq >= 0.05 | Treat_1wk.frq >= 0.05 | 
+                         Treat_3wk.frq >= 0.05 | Treat_5wk.frq >= 0.05 | 
+                         Treat_8wk.frq >= 0.05) %>% pull(gene)
+  return(geneset_oi)}
+```
+
+```{r}
+GS_oi <- lapply(receiver_clusters, geneset)
+```
+
+
+##Top Ligands
+
+```{r}
+top_lig_AT2 <- ligand_activities %>% filter(receiver_cluster == "AT2 cell") %>% top_n(10, pearson) %>% arrange(-pearson) %>% pull(test_ligand) %>% unique()
+top_lig_Art <- ligand_activities %>% filter(receiver_cluster == "Arterial") %>% top_n(10, pearson) %>% arrange(-pearson) %>% pull(test_ligand) %>% unique()
+top_lig_AM <- ligand_activities %>% filter(receiver_cluster == "Alv. Mac") %>% top_n(10, pearson) %>% arrange(-pearson) %>% pull(test_ligand) %>% unique()
+top_lig_Ven <- ligand_activities %>% filter(receiver_cluster == "Venous") %>% top_n(10, pearson) %>% arrange(-pearson) %>% pull(test_ligand) %>% unique()
+top_lig_aCap <- ligand_activities %>% filter(receiver_cluster == "aCap") %>% top_n(10, pearson) %>% arrange(-pearson) %>% pull(test_ligand) %>% unique()
+top_lig_gCap <- ligand_activities %>% filter(receiver_cluster == "gCap") %>% top_n(10, pearson) %>% arrange(-pearson) %>% pull(test_ligand) %>% unique()
+top_lig_gCapTrans <- ligand_activities %>% filter(receiver_cluster == "gCap-Trans.") %>% top_n(10, pearson) %>% arrange(-pearson) %>% pull(test_ligand) %>% unique()
+```
+
+```{r}
+top_ligands <- c(top_lig_Art, top_lig_gCap, top_lig_gCapTrans, top_lig_aCap,
+                 top_lig_Ven)
+```
+
+```{r}
+avg_expression_ligands = AverageExpression(seurat, features = top_ligands)
+```
+
+```{r}
+sender_ligand_assignment = avg_expression_ligands$RNA %>% apply(1, function(ligand_expression){
+  ligand_expression > (ligand_expression %>% mean() + ligand_expression %>% sd())
+  }) %>% t()
+
+sender_ligand_assignment = sender_ligand_assignment %>% apply(2, function(x){x[x == TRUE]}) %>% purrr::keep(function(x){length(x) > 0})
+
+names(sender_ligand_assignment)
+```
+
+```{r}
+all_assigned_ligands = sender_ligand_assignment %>% lapply(function(x){names(x)}) %>% unlist()
+unique_ligands = all_assigned_ligands %>% table() %>% .[. == 1] %>% names()
+general_ligands = top_ligands %>% setdiff(unique_ligands)
+```
+
+
+# Code from Ivana here for Circos Plot
+
+```{r}
+cell_type_order <- names(sender_ligand_assignment)
+```
+
+```{r}
+test_dat <- data.frame(Sender = "_", Ligand = top_ligands, Reciever = "_")
+test_dat$Receiver[1:10] <- "Arterial"
+test_dat$Receiver[11:20] <- "gCap"
+test_dat$Receiver[21:30] <- "gCap-Trans."
+test_dat$Receiver[31:40] <- "aCap"
+test_dat$Receiver[41:50] <- "Venous"
+```
+
+```{r}
+test_dat_L <- data.frame(Sender = "_", Ligand = all_assigned_ligands, Receiver = "_")
+test_dat_L$Sender <- rownames(test_dat_L)
+test_dat_L$Sender <- substring(test_dat_L$Sender, 1, nchar(test_dat_L$Sender)-1)
+rownames(test_dat_L) <- 1:nrow(test_dat_L)
+```
+
+```{r}
+test_dat_L$Sender <- replace(test_dat_L$Sender, 47:50, "Venous")
+test_dat_L$Sender <- replace(test_dat_L$Sender, 77, "B-cell")
+test_dat_L$Sender <- replace(test_dat_L$Sender, 81, "Cd4+ T cell")
+test_dat_L$Sender <- replace(test_dat_L$Sender, 82, "Cd8+ T cell")
+test_dat_L$Sender <- replace(test_dat_L$Sender, 83, "Mixed T cell")
+test_dat_L$Sender <- replace(test_dat_L$Sender, 84, "B-cell")
+test_dat_L$Sender <- replace(test_dat_L$Sender, 85, "Pre-T cell")
+test_dat_L$Sender <- replace(test_dat_L$Sender, 106, "Cd103+ cDC")
+test_dat_L$Sender <- replace(test_dat_L$Sender, 107, "Mast cell")
+test_dat_L <- distinct(test_dat_L)
+```
+
+```{r}
+test_dat_join <- full_join(test_dat_L, test_dat, by ="Ligand")
+test_dat_join <- rename(test_dat_join, Sender = Sender.x)
+test_dat_join <- rename(test_dat_join, Receiver = Receiver.y)
+test_dat_join <- select(test_dat_join, Sender, Ligand, Receiver)
+```
+
+```{r}
+test_dat <- test_dat_join
+rm(test_dat_join, test_dat_L)
+```
+
+```{r}
+write.csv(test_dat, file = "LR_ECs_Summary_Top10_5days.csv")
+```
+
+```{r}
+test_dat_vasc <- slice(test_dat, c(1:84,160:207))
+test_dat_other <- slice(test_dat, 85:159)
+```
+
+```{r}
+cell_type_order_vasc <- c(cell_type_order[1:8],cell_type_order[27:32])
+cell_type_order_vasc
+```
+
+```{r}
+cell_type_order_other <- c(cell_type_order[9:15],cell_type_order[17:26])
+cell_type_order_other
+cell_type_order_other[3] <- "B-cell"
+cell_type_order_other
+```
+
+```{r}
+test_dat <- test_dat_vasc
+cell_type_order <- cell_type_order_vasc
+```
+
+```{r}
+test_dat <- arrange(test_dat, match(Sender, cell_type_order), Ligand)
+test_dat$from <- paste0(test_dat$Sender, "_", test_dat$Ligand)
+test_dat$to <- test_dat$Receiver
+test_dat$value <- 1
+df <- data.frame(from = test_dat$from,
+                 to = test_dat$to,
+                 value = test_dat$value)
+```
+
+#Set up break distances between sectors for ligand senders
+```{r}
+ligand_counts <- test_dat[,c("Sender", "Ligand")]
+ligand_counts <- unique(ligand_counts)
+ligand_counts <- table(ligand_counts$Sender)[cell_type_order]
+receiver_count <- length(unique(test_dat$Receiver))
+
+gaps <- c(rep(1.25, ligand_counts[1]-1), 5,
+          rep(1.25, ligand_counts[2]-1), 5,
+          rep(1.25, ligand_counts[3]-1), 5,
+          rep(1.25, ligand_counts[4]-1), 5,
+          rep(1.25, ligand_counts[5]-1), 5,
+          rep(1.25, ligand_counts[6]-1), 5,
+          rep(1.25, ligand_counts[7]-1), 5,
+          rep(1.25, ligand_counts[8]-1), 5,
+          rep(1.25, ligand_counts[9]-1), 5,
+          rep(1.25, ligand_counts[10]-1), 5,
+          rep(1.25, ligand_counts[11]-1), 5,
+          rep(1.25, ligand_counts[12]-1), 5,
+          rep(1.25, ligand_counts[13]-1), 5,
+          rep(1.25, ligand_counts[14]-1), 10, #Left sender-receiver border
+          rep(1.25, receiver_count-1), 10) #Receiver end
+```
+
+#Sender cell types
+```{r}
+sender_list <- unique(test_dat$Sender)
+receiver_list <- unique(test_dat$Receiver)
+```
+
+#Prepare Colours
+
+```{r}
+pdf("Circos_plot_ECs-Vasc_5days.pdf",
+    width=10, height=10)
+
+cols <- palette36.colors()[1:14]
+names(cols) <- sender_list
+test_dat$cols <- cols[test_dat$Sender] 
+cols <- test_dat[,c("from", "cols")]
+cols <- unique(cols)
+tmp_names <- cols$from
+cols <- cols$cols
+names(cols) <- tmp_names
+cols <- c(cols, rep("grey40", length(receiver_list)))
+names(cols)[100:104] <- receiver_list #Adjust index to appropriate length
+
+circos.clear()
+circos.par(track.height=0.125, gap.after=gaps)
+
+chordDiagram(df,annotationTrack=c("grid"), scale=F,
+             preAllocateTracks=3,
+             directional=1,
+             grid.col=cols)
+
+tmp <- test_dat[,c("from","Ligand")]
+tmp <- unique(tmp)
+
+circos.track(track.index=3, track.height= uh(1, "inches"),
+             panel.fun=function(x,y){
+               circos.text(CELL_META$xcenter, CELL_META$ylim[1], tmp$Ligand[CELL_META$sector.numeric.index],
+                           facing="clockwise", cex=0.75,
+                           niceFacing = T, adj=c(0, 0.5))},
+             bg.border=NA)
+
+for(i in 1:length(sender_list)){
+  ligand_list <- test_dat %>% filter(Sender == sender_list[i]) %>% pull(from)
+  highlight.sector(ligand_list, track.index = 2, col = "grey80",
+                   #text = sender_list[i],  cex = 0.8, text.col = "black",
+                   niceFacing = T, border = T, padding = c(0,0, -0.75, 0))
+}
+
+for(i in 1:length(sender_list)){
+  ligand_list <- test_dat %>% filter(Sender == sender_list[i]) %>% pull(from)
+  highlight.sector(ligand_list, track.index = 1, col = "white",
+                   text = sender_list[i],  cex = 0.8, text.col = "black",
+                   facing = "clockwise", niceFacing = T, border = F, 
+                   padding = c(0,0, 0, 0))
+}
+
+for(i in 1:length(receiver_list)){
+  R_list <- test_dat %>% filter(Receiver == receiver_list[i]) %>% pull(to)
+  highlight.sector(R_list, track.index = 3, col = "white",
+                   text = receiver_list[i],  cex = 0.8, text.col = "black",
+                   facing = "bending", niceFacing = T, border = F, 
+                   padding = c(0,0, 0, 0))
+}
+
+dev.off()
+```
+
+
+
+
+
+
+
